@@ -1,8 +1,11 @@
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include "tinykv/config.hpp"
 #include "tinykv/logger.hpp"
+#include "tinykv/net/line_protocol.hpp"
+#include "tinykv/net/tcp_server.hpp"
 #include "tinykv/storage/kv_store.hpp"
 
 namespace {
@@ -25,45 +28,49 @@ Args parseArgs(int argc, char** argv) {
   return args;
 }
 
-int g_passed = 0;
-int g_failed = 0;
+// Temporary, ad hoc command dispatch: whitespace-split, straight to
+// KVStore. No real parser/validation yet - replaced by the Parser and
+// CommandExecutor in Phase 4.
+std::string dispatch(tinykv::KVStore& store, const std::string& line) {
+  std::istringstream iss(line);
+  std::string command;
+  iss >> command;
 
-void check(const std::string& description, bool condition) {
-  if (condition) {
-    std::cout << "  [PASS] " << description << "\n";
-    ++g_passed;
-  } else {
-    std::cout << "  [FAIL] " << description << "\n";
-    ++g_failed;
+  if (command.empty()) {
+    return "";
   }
+  if (command == "SET") {
+    std::string key, value;
+    iss >> key >> value;
+    if (key.empty() || value.empty()) return "ERROR wrong number of arguments for SET";
+    store.set(key, value);
+    return "OK";
+  }
+  if (command == "GET") {
+    std::string key;
+    iss >> key;
+    if (key.empty()) return "ERROR wrong number of arguments for GET";
+    auto value = store.get(key);
+    return value.has_value() ? *value : "(nil)";
+  }
+  if (command == "DEL") {
+    std::string key;
+    iss >> key;
+    if (key.empty()) return "ERROR wrong number of arguments for DEL";
+    return store.del(key) ? "1" : "0";
+  }
+  return "ERROR unknown command '" + command + "'";
 }
 
-// Temporary hardcoded exercise of KVStore, standing in for real client
-// requests until Phase 3 adds TCP networking.
-void runStorageSmokeTest() {
-  std::cout << "Running KVStore smoke test:\n";
-  tinykv::KVStore store;
-
-  check("new store is empty", store.size() == 0);
-  check("GET on missing key returns nothing", !store.get("username").has_value());
-  check("EXISTS on missing key is false", !store.exists("username"));
-
-  store.set("username", "Kushal");
-  check("EXISTS is true after SET username Kushal", store.exists("username"));
-  check("GET username returns Kushal", store.get("username") == "Kushal");
-  check("size is 1 after one SET", store.size() == 1);
-
-  store.set("username", "Agrawal");
-  check("SET on existing key overwrites the value", store.get("username") == "Agrawal");
-  check("size stays 1 after overwriting an existing key", store.size() == 1);
-
-  check("DELETE username returns true", store.del("username"));
-  check("GET after DELETE returns nothing", !store.get("username").has_value());
-  check("size is 0 after DELETE", store.size() == 0);
-
-  check("DELETE on an already-missing key returns false", !store.del("username"));
-
-  std::cout << g_passed << " passed, " << g_failed << " failed\n";
+void handleConnection(tinykv::KVStore& store, int clientFd) {
+  tinykv::LineReader reader;
+  std::string line;
+  while (reader.readLine(clientFd, line)) {
+    std::string response = dispatch(store, line);
+    if (!response.empty() && !tinykv::writeLine(clientFd, response)) {
+      break;
+    }
+  }
 }
 
 }  // namespace
@@ -82,14 +89,23 @@ int main(int argc, char** argv) {
   LOG_INFO("Port: " + std::to_string(port));
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Server v0.2 (Phase 2)\n";
+  std::cout << "  TinyKV Server v0.3 (Phase 3)\n";
   std::cout << "  Redis-inspired KV store in C++17\n";
   std::cout << "==================================\n";
-  std::cout << "Configured port: " << port << "\n";
-  std::cout << "(networking not implemented yet - see Phase 3)\n\n";
+  std::cout << "Listening on port " << port << "\n";
+  std::cout << "Connect with: nc localhost " << port << "   or   tinykv-cli\n";
+  std::cout << "(one client at a time for now - see Phase 5 for concurrency)\n\n";
 
-  runStorageSmokeTest();
+  tinykv::KVStore store;
+  tinykv::TcpServer server(port);
 
-  LOG_INFO("TinyKV server shutting down (Phase 2: no server loop yet)");
-  return g_failed == 0 ? 0 : 1;
+  if (!server.start()) {
+    LOG_ERROR("Failed to start TCP server on port " + std::to_string(port));
+    return 1;
+  }
+
+  server.run([&store](int clientFd) { handleConnection(store, clientFd); });
+
+  LOG_INFO("TinyKV server shutting down");
+  return 0;
 }

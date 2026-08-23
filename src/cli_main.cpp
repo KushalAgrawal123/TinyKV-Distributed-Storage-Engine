@@ -3,11 +3,13 @@
 
 #include "tinykv/config.hpp"
 #include "tinykv/logger.hpp"
+#include "tinykv/net/tcp_client.hpp"
 
 namespace {
 
 struct Args {
   std::string configPath = "tinykv.conf";
+  std::string host = "127.0.0.1";
   int port = -1;  // -1 means "not set on the command line"
 };
 
@@ -19,6 +21,8 @@ Args parseArgs(int argc, char** argv) {
       args.configPath = argv[++i];
     } else if (arg == "--port" && i + 1 < argc) {
       args.port = std::stoi(argv[++i]);
+    } else if (arg == "--host" && i + 1 < argc) {
+      args.host = argv[++i];
     }
   }
   return args;
@@ -37,10 +41,43 @@ int main(int argc, char** argv) {
   tinykv::Logger::init(tinykv::LogLevel::INFO);
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV CLI v0.1 (Phase 1)\n";
+  std::cout << "  TinyKV CLI v0.3 (Phase 3)\n";
   std::cout << "==================================\n";
-  std::cout << "Target server port: " << port << "\n";
-  std::cout << "(connecting to a server is not implemented yet - see Phase 3)\n";
 
+  tinykv::TcpClient client;
+  if (!client.connect(args.host, port)) {
+    std::cerr << "Failed to connect to " << args.host << ":" << port << "\n";
+    return 1;
+  }
+  std::cout << "Connected to " << args.host << ":" << port << "\n";
+  std::cout << "Type commands (SET key value / GET key / DEL key), or 'quit' to exit.\n";
+
+  std::string input;
+  while (true) {
+    std::cout << "tinykv> ";
+    if (!std::getline(std::cin, input)) {
+      break;  // EOF (Ctrl+D)
+    }
+    if (input == "quit" || input == "exit") {
+      break;
+    }
+    if (input.empty()) {
+      continue;
+    }
+
+    if (!client.sendLine(input)) {
+      std::cerr << "Connection lost while sending.\n";
+      break;
+    }
+
+    std::string response;
+    if (!client.receiveLine(response)) {
+      std::cerr << "Connection lost while waiting for a reply.\n";
+      break;
+    }
+    std::cout << response << "\n";
+  }
+
+  std::cout << "Bye.\n";
   return 0;
 }

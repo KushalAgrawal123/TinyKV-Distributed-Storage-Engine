@@ -2,6 +2,9 @@ set(TINYKV_CORE_SOURCES
     logger.cpp
     config.cpp
     storage/kv_store.cpp
+    net/line_protocol.cpp
+    net/tcp_server.cpp
+    net/tcp_client.cpp
 )
 
 add_library(tinykv_core STATIC ${TINYKV_CORE_SOURCES})
