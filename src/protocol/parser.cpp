@@ -33,6 +33,8 @@ CommandType commandTypeFromName(const std::string& name) {
   if (upper == "GET") return CommandType::GET;
   if (upper == "DEL") return CommandType::DEL;
   if (upper == "PING") return CommandType::PING;
+  if (upper == "INCR") return CommandType::INCR;
+  if (upper == "DECR") return CommandType::DECR;
   return CommandType::UNKNOWN;
 }
 

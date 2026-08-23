@@ -79,6 +79,12 @@ check "unknown command is a clean error" 'BOGUS\n' "-ERR unknown command 'BOGUS'
 check "SET with wrong arity errors"    'SET onlykey\n' "-ERR wrong number of arguments for 'SET'"
 check "GET with wrong arity errors"    'GET\n' "-ERR wrong number of arguments for 'GET'"
 
+echo "==> Storage engine checks (Phase 6)"
+check "INCR on a missing key starts at 1" 'INCR counter\n' ':1'
+check "INCR again reaches 2"           'INCR counter\n' ':2'
+check "DECR brings it back to 1"       'DECR counter\n' ':1'
+check "INCR on a non-integer value errors" $'SET notanumber abc\nINCR notanumber\n' $'+OK\n-ERR value is not an integer or out of range'
+
 echo "==> Concurrency checks (Phase 5)"
 CONCURRENT_TOTAL=30
 CONCURRENT_DIR="$BUILD_DIR/smoke_test_concurrency"

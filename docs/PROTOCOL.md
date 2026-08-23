@@ -46,14 +46,22 @@ Every reply is exactly one line, starting with a type prefix:
 `$-1` means "no value" (e.g. `GET` on a missing key) - it is never an
 error.
 
-## Commands (as of Phase 4)
+## Commands (as of Phase 6)
 
-| Command         | Arguments   | Reply                                       |
-|-----------------|-------------|-----------------------------------------------|
-| `SET key value` | key, value  | `+OK`                                          |
-| `GET key`       | key         | `+<value>`, or `$-1` if the key doesn't exist  |
-| `DEL key`       | key         | `:1` if the key existed, else `:0`             |
-| `PING`          | (none)      | `+OK`                                           |
+| Command         | Arguments   | Reply                                                  |
+|-----------------|-------------|----------------------------------------------------------|
+| `SET key value` | key, value  | `+OK`                                                     |
+| `GET key`       | key         | `+<value>`, or `$-1` if the key doesn't exist             |
+| `DEL key`       | key         | `:1` if the key existed, else `:0`                        |
+| `PING`          | (none)      | `+OK`                                                      |
+| `INCR key`      | key         | `:<new value>`, after adding 1 (a missing key reads as 0)  |
+| `DECR key`      | key         | `:<new value>`, after subtracting 1                        |
+
+`INCR`/`DECR` fail with `-ERR value is not an integer or out of range` if
+the key holds a value that can't be parsed as an integer. The read,
+modify, and write happen under a single lock in `KVStore::incrementBy`,
+so concurrent `INCR`s on the same key can't lose an update the way a
+separate `GET` then `SET` from the client would.
 
 Wrong argument counts and unknown commands both produce a `-ERR ...`
 reply; the connection is never dropped because of bad input. More

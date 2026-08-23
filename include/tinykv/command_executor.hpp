@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <string>
 
 #include "tinykv/protocol/command.hpp"
@@ -19,8 +21,17 @@ class CommandExecutor {
 
   std::string execute(const Command& cmd);
 
+  // Telemetry, safe to read from any thread while execute() runs
+  // concurrently on others.
+  uint64_t totalCommands() const { return totalCommands_.load(); }
+  uint64_t totalHits() const { return totalHits_.load(); }
+  uint64_t totalMisses() const { return totalMisses_.load(); }
+
  private:
   KVStore& store_;
+  std::atomic<uint64_t> totalCommands_{0};
+  std::atomic<uint64_t> totalHits_{0};
+  std::atomic<uint64_t> totalMisses_{0};
 };
 
 }  // namespace tinykv

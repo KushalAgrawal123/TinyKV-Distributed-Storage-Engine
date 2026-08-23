@@ -80,13 +80,13 @@ int main(int argc, char** argv) {
   LOG_INFO("Port: " + std::to_string(port));
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Server v0.5 (Phase 5)\n";
+  std::cout << "  TinyKV Server v0.6 (Phase 6)\n";
   std::cout << "  Redis-inspired KV store in C++17\n";
   std::cout << "==================================\n";
   std::cout << "Listening on port " << port << "\n";
   std::cout << "Connect with: nc localhost " << port << "   or   tinykv-cli\n";
-  std::cout << "Commands: SET key value | GET key | DEL key | PING\n";
-  std::cout << "(now serving multiple clients concurrently)\n\n";
+  std::cout << "Commands: SET key value | GET key | DEL key | PING | INCR key | DECR key\n";
+  std::cout << "(now serving multiple clients concurrently, thread-safe storage)\n\n";
 
   tinykv::KVStore store;
   tinykv::CommandExecutor executor(store);
