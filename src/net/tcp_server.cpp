@@ -7,14 +7,17 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <sstream>
 #include <string>
+#include <thread>
 
 #include "tinykv/logger.hpp"
 
 namespace tinykv {
 
-TcpServer::TcpServer(int port) : port_(port), listenFd_(-1), running_(false) {}
+TcpServer::TcpServer(int port) : port_(port), listenFd_(-1), running_(false), activeConnections_(0) {}
 
 TcpServer::~TcpServer() { stop(); }
 
@@ -76,12 +79,29 @@ void TcpServer::run(const std::function<void(int)>& connectionHandler) {
 
     char ipStr[INET_ADDRSTRLEN] = {0};
     inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
-    LOG_INFO(std::string("Client connected: ") + ipStr + ":" + std::to_string(ntohs(clientAddr.sin_port)));
+    std::string clientDesc = std::string(ipStr) + ":" + std::to_string(ntohs(clientAddr.sin_port));
 
-    connectionHandler(clientFd);
+    ++activeConnections_;
+    std::thread([this, clientFd, connectionHandler, clientDesc]() {
+      std::ostringstream tid;
+      tid << std::this_thread::get_id();
+      LOG_INFO("Client connected: " + clientDesc + " (thread " + tid.str() + ")");
 
-    ::close(clientFd);
-    LOG_INFO("Client disconnected");
+      connectionHandler(clientFd);
+
+      ::close(clientFd);
+      LOG_INFO("Client disconnected: " + clientDesc);
+      --activeConnections_;
+    }).detach();
+  }
+
+  // Best-effort, bounded wait for in-flight connection threads to finish
+  // on their own - not a join, since they're detached. "Clean-ish"
+  // shutdown, not a guarantee; a connection thread still running past the
+  // deadline is abandoned when the process exits.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (activeConnections_.load() > 0 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
 }
 

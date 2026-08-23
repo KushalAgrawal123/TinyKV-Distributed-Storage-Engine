@@ -8,6 +8,7 @@ set(TINYKV_CORE_SOURCES
     protocol/parser.cpp
     protocol/reply.cpp
     command_executor.cpp
+    concurrency/thread_pool.cpp
 )
 
 add_library(tinykv_core STATIC ${TINYKV_CORE_SOURCES})

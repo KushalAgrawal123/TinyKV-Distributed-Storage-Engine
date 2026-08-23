@@ -1,3 +1,4 @@
+#include <csignal>
 #include <iostream>
 #include <string>
 
@@ -52,6 +53,17 @@ void handleConnection(tinykv::CommandExecutor& executor, int clientFd) {
   }
 }
 
+// Set once the server is started; a signal handler can only reach it
+// through global state. TcpServer::stop() is deliberately minimal (a flag
+// flip and a close()) so it's safe to call directly here.
+tinykv::TcpServer* g_server = nullptr;
+
+void handleShutdownSignal(int /*signal*/) {
+  if (g_server != nullptr) {
+    g_server->stop();
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -68,13 +80,13 @@ int main(int argc, char** argv) {
   LOG_INFO("Port: " + std::to_string(port));
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Server v0.4 (Phase 4)\n";
+  std::cout << "  TinyKV Server v0.5 (Phase 5)\n";
   std::cout << "  Redis-inspired KV store in C++17\n";
   std::cout << "==================================\n";
   std::cout << "Listening on port " << port << "\n";
   std::cout << "Connect with: nc localhost " << port << "   or   tinykv-cli\n";
   std::cout << "Commands: SET key value | GET key | DEL key | PING\n";
-  std::cout << "(one client at a time for now - see Phase 5 for concurrency)\n\n";
+  std::cout << "(now serving multiple clients concurrently)\n\n";
 
   tinykv::KVStore store;
   tinykv::CommandExecutor executor(store);
@@ -84,6 +96,10 @@ int main(int argc, char** argv) {
     LOG_ERROR("Failed to start TCP server on port " + std::to_string(port));
     return 1;
   }
+
+  g_server = &server;
+  std::signal(SIGINT, handleShutdownSignal);
+  std::signal(SIGTERM, handleShutdownSignal);
 
   server.run([&executor](int clientFd) { handleConnection(executor, clientFd); });
 

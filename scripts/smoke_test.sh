@@ -79,6 +79,29 @@ check "unknown command is a clean error" 'BOGUS\n' "-ERR unknown command 'BOGUS'
 check "SET with wrong arity errors"    'SET onlykey\n' "-ERR wrong number of arguments for 'SET'"
 check "GET with wrong arity errors"    'GET\n' "-ERR wrong number of arguments for 'GET'"
 
+echo "==> Concurrency checks (Phase 5)"
+CONCURRENT_TOTAL=30
+CONCURRENT_DIR="$BUILD_DIR/smoke_test_concurrency"
+rm -rf "$CONCURRENT_DIR"
+mkdir -p "$CONCURRENT_DIR"
+CONCURRENT_PIDS=()
+for i in $(seq 1 "$CONCURRENT_TOTAL"); do
+  (printf 'PING\n' | nc -w 2 "$HOST" "$PORT" > "$CONCURRENT_DIR/$i.out") &
+  CONCURRENT_PIDS+=("$!")
+done
+# Wait only on the nc jobs above, not the still-running server (also a
+# background job of this shell) - a bare `wait` would block forever.
+wait "${CONCURRENT_PIDS[@]}"
+CONCURRENT_OK=$(grep -lx '+OK' "$CONCURRENT_DIR"/*.out 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$CONCURRENT_OK" -eq "$CONCURRENT_TOTAL" ]]; then
+  echo "  [PASS] $CONCURRENT_TOTAL concurrent PING connections all succeeded"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] only $CONCURRENT_OK/$CONCURRENT_TOTAL concurrent PING connections succeeded"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$CONCURRENT_DIR"
+
 echo ""
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
