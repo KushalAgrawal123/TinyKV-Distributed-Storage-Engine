@@ -51,6 +51,13 @@ bool KVStore::del(const std::string& key) {
   return true;
 }
 
+void KVStore::forEach(const std::function<void(const std::string&, const std::string&)>& fn) const {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  for (const auto& entry : lru_) {
+    fn(entry.first, entry.second);
+  }
+}
+
 bool KVStore::exists(const std::string& key) const {
   // Unlike get(), an existence check doesn't count as an access for LRU
   // purposes (matching Redis), so this stays a real concurrent read.

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <stdexcept>
 
+#include "tinykv/persistence/persistence_manager.hpp"
 #include "tinykv/protocol/reply.hpp"
 
 namespace tinykv {
@@ -53,6 +54,8 @@ bool parsePositiveSeconds(const std::string& s, long long& outSeconds) {
 }  // namespace
 
 CommandExecutor::CommandExecutor(KVStore& store, ExpiryManager& expiry) : store_(store), expiry_(expiry) {}
+
+void CommandExecutor::setPersistence(PersistenceManager* persistence) { persistence_ = persistence; }
 
 std::string CommandExecutor::execute(const Command& cmd) {
   ++totalCommands_;
@@ -131,6 +134,14 @@ std::string CommandExecutor::execute(const Command& cmd) {
       bool hadExpiry = expiry_.expiryOf(key).has_value();
       expiry_.cancel(key);
       return Reply::integer(hadExpiry ? 1 : 0);
+    }
+    case CommandType::SAVE: {
+      if (!cmd.args.empty()) return arityError(cmd);
+      if (persistence_ == nullptr) {
+        return Reply::error("persistence is not enabled");
+      }
+      persistence_->save();
+      return Reply::ok();
     }
     case CommandType::UNKNOWN:
     default:

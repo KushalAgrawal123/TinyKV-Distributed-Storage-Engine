@@ -38,6 +38,7 @@ CommandType commandTypeFromName(const std::string& name) {
   if (upper == "TTL") return CommandType::TTL;
   if (upper == "EXPIRE") return CommandType::EXPIRE;
   if (upper == "PERSIST") return CommandType::PERSIST;
+  if (upper == "SAVE") return CommandType::SAVE;
   return CommandType::UNKNOWN;
 }
 

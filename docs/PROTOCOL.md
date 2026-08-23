@@ -46,7 +46,7 @@ Every reply is exactly one line, starting with a type prefix:
 `$-1` means "no value" (e.g. `GET` on a missing key) - it is never an
 error.
 
-## Commands (as of Phase 7)
+## Commands (as of Phase 8)
 
 | Command                  | Arguments        | Reply                                                     |
 |---------------------------|------------------|---------------------------------------------------------------|
@@ -60,6 +60,29 @@ error.
 | `TTL key`                 | key              | seconds remaining as `:<n>`; `:-1` if the key has no TTL, `:-2` if the key doesn't exist |
 | `EXPIRE key seconds`      | key, seconds (positive integer) | `:1` if a TTL was set, `:0` if the key doesn't exist |
 | `PERSIST key`             | key              | `:1` if a TTL was removed, `:0` if the key didn't exist or had none |
+| `SAVE`                    | (none)           | `+OK`; immediately snapshots the dataset and resets the AOF |
+
+### Persistence
+
+Every successfully-executed write command (`SET`, `DEL`, `INCR`, `DECR`,
+`EXPIRE`, `PERSIST` - `SAVE` itself doesn't count) is appended verbatim to
+the append-only file (`<dir>/<appendfilename>`) as it happens. On
+startup, TinyKV loads the most recent snapshot (`<dir>/<dbfilename>`, if
+any) and then replays the AOF on top of it, reconstructing the dataset
+exactly as it was. A background timer flushes the AOF to disk roughly
+once a second and, every `save_interval` seconds, takes a fresh snapshot
+and resets the AOF (the snapshot already captures everything the AOF
+would have replayed, so there's no need to replay both). `SAVE` does the
+same thing on demand.
+
+The snapshot format is literally a sequence of `SET key value` lines -
+the same format the AOF and the wire protocol already use - so loading
+either one is just replaying it through the normal parser/executor
+pipeline. This keeps persistence consistent with the rest of the
+project's "simple text protocol" design, at the cost of not persisting
+TTLs: a key's expiration is in-memory only and does not survive a
+restart (a replayed `SET ... EX` line, if one is still in the AOF, does
+restore a TTL, but relative to replay time, not the original deadline).
 
 `INCR`/`DECR` fail with `-ERR value is not an integer or out of range` if
 the key holds a value that can't be parsed as an integer. The read,

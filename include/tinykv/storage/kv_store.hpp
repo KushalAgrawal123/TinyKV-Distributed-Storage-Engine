@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,13 @@ class KVStore {
   bool del(const std::string& key);
   bool exists(const std::string& key) const;
   size_t size() const;
+
+  // Invokes fn(key, value) for every entry currently in the store, under
+  // a single shared lock held for the whole iteration (a consistent
+  // point-in-time view, at the cost of blocking writers meanwhile).
+  // Doesn't touch LRU recency, same as exists(). Used by SnapshotManager
+  // to serialize the dataset.
+  void forEach(const std::function<void(const std::string&, const std::string&)>& fn) const;
 
   // Atomically parses the current value as an integer (a missing key
   // reads as 0), adds delta, stores the result back as a string, and

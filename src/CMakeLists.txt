@@ -10,6 +10,10 @@ set(TINYKV_CORE_SOURCES
     protocol/reply.cpp
     command_executor.cpp
     concurrency/thread_pool.cpp
+    persistence/replay.cpp
+    persistence/aof.cpp
+    persistence/snapshot.cpp
+    persistence/persistence_manager.cpp
 )
 
 add_library(tinykv_core STATIC ${TINYKV_CORE_SOURCES})

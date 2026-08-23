@@ -3,10 +3,12 @@
 #include <string>
 
 #include "tinykv/command_executor.hpp"
+#include "tinykv/concurrency/thread_pool.hpp"
 #include "tinykv/config.hpp"
 #include "tinykv/logger.hpp"
 #include "tinykv/net/line_protocol.hpp"
 #include "tinykv/net/tcp_server.hpp"
+#include "tinykv/persistence/persistence_manager.hpp"
 #include "tinykv/protocol/parser.hpp"
 #include "tinykv/protocol/reply.hpp"
 #include "tinykv/storage/expiry_manager.hpp"
@@ -16,8 +18,8 @@ namespace {
 
 struct Args {
   std::string configPath = "tinykv.conf";
-  int port = -1;      // -1 means "not set on the command line"
-  int maxKeys = -1;   // -1 means "not set on the command line"
+  int port = -1;     // -1 means "not set on the command line"
+  int maxKeys = -1;  // -1 means "not set on the command line"
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -35,7 +37,7 @@ Args parseArgs(int argc, char** argv) {
   return args;
 }
 
-void handleConnection(tinykv::CommandExecutor& executor, int clientFd) {
+void handleConnection(tinykv::CommandExecutor& executor, tinykv::PersistenceManager& persistence, int clientFd) {
   tinykv::LineReader reader;
   std::string line;
   while (reader.readLine(clientFd, line)) {
@@ -44,11 +46,22 @@ void handleConnection(tinykv::CommandExecutor& executor, int clientFd) {
     }
 
     std::string response;
+    bool parsed = false;
+    tinykv::Command cmd;
     try {
-      tinykv::Command cmd = tinykv::Parser::parse(line);
+      cmd = tinykv::Parser::parse(line);
+      parsed = true;
       response = executor.execute(cmd);
     } catch (const tinykv::ProtocolError& e) {
       response = tinykv::Reply::error(e.what());
+    }
+
+    // Only a successfully-executed write command is durable state that
+    // needs replaying on recovery; a failed SET (e.g. wrong arity) never
+    // touched the store, so it must not go in the AOF either.
+    bool succeeded = parsed && (response.empty() || response[0] != '-');
+    if (succeeded && tinykv::isWriteCommand(cmd.type)) {
+      persistence.recordWrite(line);
     }
 
     if (!tinykv::writeLine(clientFd, response)) {
@@ -80,45 +93,65 @@ int main(int argc, char** argv) {
   int maxKeysRaw = args.maxKeys != -1 ? args.maxKeys : config.getInt("max_keys", 0);
   size_t maxKeys = maxKeysRaw > 0 ? static_cast<size_t>(maxKeysRaw) : 0;
 
+  tinykv::PersistenceConfig persistConfig;
+  persistConfig.appendOnly = config.getBool("appendonly", true);
+  persistConfig.dir = config.getString("dir", "./data");
+  persistConfig.dbFilename = config.getString("dbfilename", "dump.tkv");
+  persistConfig.appendFilename = config.getString("appendfilename", "tinykv.aof");
+  persistConfig.saveIntervalSeconds = config.getInt("save_interval", 300);
+
   tinykv::Logger::init(tinykv::LogLevel::INFO);
   LOG_INFO("TinyKV server starting up");
   LOG_INFO("Config file: " + args.configPath);
   LOG_INFO("Port: " + std::to_string(port));
   LOG_INFO("Max keys (LRU capacity): " + (maxKeys == 0 ? std::string("unbounded") : std::to_string(maxKeys)));
+  LOG_INFO("Persistence dir: " + persistConfig.dir + " (appendonly=" +
+           (persistConfig.appendOnly ? "yes" : "no") + ")");
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Server v0.7 (Phase 7)\n";
+  std::cout << "  TinyKV Server v0.8 (Phase 8)\n";
   std::cout << "  Redis-inspired KV store in C++17\n";
   std::cout << "==================================\n";
   std::cout << "Listening on port " << port << "\n";
   std::cout << "Connect with: nc localhost " << port << "   or   tinykv-cli\n";
   std::cout << "Commands: SET key value [EX seconds] | GET key | DEL key | PING\n";
-  std::cout << "          INCR key | DECR key | TTL key | EXPIRE key seconds | PERSIST key\n";
-  std::cout << "(multi-client, thread-safe, LRU-capped, with key expiration)\n\n";
+  std::cout << "          INCR key | DECR key | TTL key | EXPIRE key seconds | PERSIST key | SAVE\n";
+  std::cout << "(multi-client, thread-safe, LRU-capped, expiring keys, durable via AOF+snapshot)\n\n";
 
-  // Declaration order matters: destruction happens in reverse, so store
-  // must outlive expiryManager's background thread - the onExpire
-  // callback below captures &store and calls store.del(key).
+  // Declaration order matters: destruction happens in reverse. store must
+  // outlive expiryManager's background thread (its onExpire callback
+  // captures &store) and persistence's background timer (which touches
+  // store_ and executor_ through references it was constructed with).
   tinykv::KVStore store(maxKeys);
   tinykv::ExpiryManager expiryManager;
   tinykv::CommandExecutor executor(store, expiryManager);
-  tinykv::TcpServer server(port);
+  tinykv::ThreadPool backgroundPool(2);
+  tinykv::PersistenceManager persistence(persistConfig, store, executor, backgroundPool);
+  executor.setPersistence(&persistence);
 
-  if (!server.start()) {
-    LOG_ERROR("Failed to start TCP server on port " + std::to_string(port));
-    return 1;
-  }
+  tinykv::TcpServer server(port);
 
   expiryManager.start([&store](const std::string& key) {
     store.del(key);
     LOG_INFO("Key expired: " + key);
   });
 
+  // Recovery must finish before the server starts accepting connections,
+  // so no client can observe a partially-restored dataset.
+  persistence.recover();
+
+  if (!server.start()) {
+    LOG_ERROR("Failed to start TCP server on port " + std::to_string(port));
+    return 1;
+  }
+
+  persistence.start();
+
   g_server = &server;
   std::signal(SIGINT, handleShutdownSignal);
   std::signal(SIGTERM, handleShutdownSignal);
 
-  server.run([&executor](int clientFd) { handleConnection(executor, clientFd); });
+  server.run([&executor, &persistence](int clientFd) { handleConnection(executor, persistence, clientFd); });
 
   LOG_INFO("TinyKV server shutting down");
   return 0;
