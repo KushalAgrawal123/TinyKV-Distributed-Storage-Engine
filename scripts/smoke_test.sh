@@ -34,7 +34,22 @@ cmake --build "$BUILD_DIR" --parallel > "$BUILD_DIR/smoke_test_build.log" 2>&1 |
 }
 
 echo "==> Starting tinykv-server on port $PORT"
-"$BUILD_DIR/src/tinykv-server" --port "$PORT" > "$BUILD_DIR/smoke_test_server.log" 2>&1 &
+# A fresh, isolated data dir each run: since Phase 8, the server persists
+# by default (dir=./data), so reusing a stale directory across runs would
+# resurrect leftover keys (e.g. a counter from a prior run's INCR checks)
+# and make the checks below flaky/wrong.
+SMOKE_DATA_DIR="$BUILD_DIR/smoke_test_data"
+rm -rf "$SMOKE_DATA_DIR"
+mkdir -p "$SMOKE_DATA_DIR"
+SMOKE_CONFIG="$BUILD_DIR/smoke_test.conf"
+cat > "$SMOKE_CONFIG" <<EOF
+port=$PORT
+dir=$SMOKE_DATA_DIR
+appendonly=true
+save_interval=0
+EOF
+
+"$BUILD_DIR/src/tinykv-server" --config "$SMOKE_CONFIG" > "$BUILD_DIR/smoke_test_server.log" 2>&1 &
 SERVER_PID=$!
 
 for _ in $(seq 1 50); do

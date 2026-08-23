@@ -4,6 +4,9 @@ build/
 # Runtime data (AOF, snapshots) - added in Phase 8
 data/
 
+# Generated benchmark results - added in Phase 9
+benchmarks/results/
+
 # Object files / static libs
 *.o
 *.a
