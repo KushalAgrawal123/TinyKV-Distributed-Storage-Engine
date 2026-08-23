@@ -5,7 +5,7 @@
 
 namespace tinykv {
 
-enum class CommandType { SET, GET, DEL, PING, INCR, DECR, UNKNOWN };
+enum class CommandType { SET, GET, DEL, PING, INCR, DECR, TTL, EXPIRE, PERSIST, UNKNOWN };
 
 struct Command {
   CommandType type = CommandType::UNKNOWN;

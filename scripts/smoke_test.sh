@@ -66,6 +66,27 @@ check() {
   fi
 }
 
+# checkTtlApprox <description> <input> <expectedSeconds>
+# TTL counts down in real time, so an exact match is inherently flaky -
+# this only requires the last reply line to be a ":<n>" with n in
+# (expectedSeconds - 2, expectedSeconds].
+checkTtlApprox() {
+  local description="$1"
+  local input="$2"
+  local expectedSeconds="$3"
+  local actual actualNum
+  actual="$(printf '%b' "$input" | nc -w 2 "$HOST" "$PORT" | tail -1)"
+  actualNum="${actual#:}"
+  if [[ "$actual" =~ ^:[0-9]+$ ]] && ((actualNum <= expectedSeconds)) && ((actualNum > expectedSeconds - 2)); then
+    echo "  [PASS] $description"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $description"
+    echo "         expected last line in (:$((expectedSeconds - 2)), :$expectedSeconds], got: $actual"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "==> Protocol checks (Phase 4)"
 check "SET returns OK"                 'SET foo bar\n' '+OK'
 check "GET returns the value"          'GET foo\n' '+bar'
@@ -84,6 +105,16 @@ check "INCR on a missing key starts at 1" 'INCR counter\n' ':1'
 check "INCR again reaches 2"           'INCR counter\n' ':2'
 check "DECR brings it back to 1"       'DECR counter\n' ':1'
 check "INCR on a non-integer value errors" $'SET notanumber abc\nINCR notanumber\n' $'+OK\n-ERR value is not an integer or out of range'
+
+echo "==> Expiration checks (Phase 7)"
+check "TTL on a missing key is -2"     'TTL nosuchkey\n' ':-2'
+check "SET without EX has no TTL"      $'SET permanent here\nTTL permanent\n' $'+OK\n:-1'
+checkTtlApprox "SET ... EX sets a TTL" $'SET withttl here EX 100\nTTL withttl\n' 100
+check "PERSIST removes the TTL"        $'PERSIST withttl\nTTL withttl\n' $':1\n:-1'
+check "EXPIRE on a missing key returns 0" 'EXPIRE nosuchkey 10\n' ':0'
+checkTtlApprox "EXPIRE sets a TTL on an existing key" $'EXPIRE permanent 50\nTTL permanent\n' 50
+check "SET ... EX with a bad seconds value errors" 'SET x y EX notanumber\n' "-ERR invalid expire time in 'SET' command"
+check "plain SET clears a previous TTL" $'EXPIRE permanent 50\nSET permanent again\nTTL permanent\n' $':1\n+OK\n:-1'
 
 echo "==> Concurrency checks (Phase 5)"
 CONCURRENT_TOTAL=30

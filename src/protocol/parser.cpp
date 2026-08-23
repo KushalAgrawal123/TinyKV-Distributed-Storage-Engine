@@ -35,6 +35,9 @@ CommandType commandTypeFromName(const std::string& name) {
   if (upper == "PING") return CommandType::PING;
   if (upper == "INCR") return CommandType::INCR;
   if (upper == "DECR") return CommandType::DECR;
+  if (upper == "TTL") return CommandType::TTL;
+  if (upper == "EXPIRE") return CommandType::EXPIRE;
+  if (upper == "PERSIST") return CommandType::PERSIST;
   return CommandType::UNKNOWN;
 }
 

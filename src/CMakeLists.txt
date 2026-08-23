@@ -2,6 +2,7 @@ set(TINYKV_CORE_SOURCES
     logger.cpp
     config.cpp
     storage/kv_store.cpp
+    storage/expiry_manager.cpp
     net/line_protocol.cpp
     net/tcp_server.cpp
     net/tcp_client.cpp
