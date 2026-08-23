@@ -1,0 +1,15 @@
+# Build output
+build/
+
+# Runtime data (AOF, snapshots) - added in Phase 8
+data/
+
+# Object files / static libs
+*.o
+*.a
+
+# macOS
+.DS_Store
+
+# Claude Code session housekeeping (not project content)
+.claude/

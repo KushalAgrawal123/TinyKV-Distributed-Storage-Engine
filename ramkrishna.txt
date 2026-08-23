@@ -1,0 +1,579 @@
+TinyKV — Redis-Inspired Distributed Key-Value Store
+Complete Development Plan
+Project Vision
+
+TinyKV is a Redis-inspired in-memory key-value database built from scratch in C++ to understand the internal working of modern storage systems.
+
+Instead of using existing databases, the goal is to implement core database and distributed system concepts manually:
+
+TCP networking
+custom client-server protocol
+memory storage engine
+concurrency handling
+caching strategies
+persistence
+replication
+sharding
+fault tolerance
+
+The project should demonstrate strong understanding of Operating Systems, Computer Networks, Database Systems, and Distributed Systems.
+
+Final Architecture
+                 Client Applications
+
+                        |
+                        |
+                 TCP Connection
+
+                        |
+                        |
+
+                  TinyKV Server
+
+                        |
+        --------------------------------
+        |              |               |
+   Command Engine   Storage Engine   Persistence
+        |              |               |
+   Parser          Hash Table          AOF
+   Executor        LRU Cache           Snapshot
+                   Expiration
+
+                        |
+
+              Thread Pool / Workers
+
+                        |
+
+              Optional Distributed Layer
+
+          Replication + Sharding
+Technology Stack
+Programming
+C++17
+STL
+CMake
+Networking
+TCP sockets
+Custom application protocol
+Concurrency
+std::thread
+Mutex
+Condition variables
+Thread pool
+Storage
+Hash tables
+LRU cache
+Priority queue
+Append-only log
+Snapshot files
+Testing
+Google Test
+Custom benchmarking tools
+Development
+Linux/macOS
+Git
+GDB/LLDB
+Phase 1: Project Setup and C++ Foundation
+Goal
+
+Create a professional C++ systems project structure.
+
+Setup:
+
+TinyKV/
+
+├── src/
+│
+├── include/
+│
+├── tests/
+│
+├── benchmarks/
+│
+├── CMakeLists.txt
+│
+└── README.md
+
+Implement:
+
+CMake build system
+source/header separation
+logging system
+configuration management
+
+Learn:
+
+C++ compilation
+memory management
+debugging
+project organization
+Phase 2: Basic In-Memory Storage Engine
+Goal
+
+Build the core database.
+
+Implement:
+
+Commands:
+SET key value
+
+GET key
+
+DELETE key
+
+Example:
+
+Client:
+
+SET username Kushal
+
+Database:
+
+username → Kushal
+
+Client:
+
+GET username
+
+Response:
+
+Kushal
+
+Initial storage:
+
+unordered_map<string,string>
+
+Implement:
+
+insertion
+lookup
+deletion
+error handling
+
+Concepts:
+
+hash tables
+memory storage
+key-value databases
+Phase 3: TCP Client-Server Architecture
+Goal
+
+Convert TinyKV into a real database server.
+
+Architecture:
+
+Client
+
+   |
+   |
+ TCP Socket
+
+   |
+
+TinyKV Server
+
+   |
+
+Storage Engine
+
+Implement server:
+
+socket creation
+bind
+listen
+accept connections
+process requests
+
+Implement client:
+
+connect
+send commands
+receive responses
+
+Learn:
+
+TCP/IP
+sockets
+networking
+server architecture
+Phase 4: Custom Database Protocol
+
+Redis uses its own protocol.
+
+TinyKV will implement a simplified protocol.
+
+Example:
+
+Request:
+
+SET name Kushal
+
+Parser converts:
+
+Command:
+SET
+
+Key:
+name
+
+Value:
+Kushal
+
+Response:
+
+OK
+
+Implement:
+
+command parser
+validation
+response formatting
+error messages
+
+Concepts:
+
+protocol design
+serialization
+request processing
+Phase 5: Multi-Client Support
+Goal
+
+Allow multiple users to connect simultaneously.
+
+Current:
+
+Client
+ |
+Server
+
+Upgrade:
+
+Client A \
+          \
+Client B ---> TinyKV Server
+          /
+Client C /
+
+Implement:
+
+thread-per-client model
+worker threads
+thread pool
+
+Handle:
+
+simultaneous reads
+concurrent writes
+synchronization
+
+Concepts:
+
+concurrency
+race conditions
+thread safety
+Phase 6: Thread-Safe Storage Engine
+
+Multiple clients can access the database.
+
+Problem:
+
+Two clients:
+
+Client A:
+SET balance 100
+
+
+Client B:
+SET balance 200
+
+Need safe execution.
+
+Implement:
+
+mutex locks
+reader-writer locks
+atomic operations
+
+Improve:
+
+concurrent reads
+controlled writes
+
+Concepts:
+
+synchronization
+critical sections
+locking strategies
+Phase 7: Advanced Data Structures
+
+Improve the storage layer.
+
+1. LRU Cache
+
+Implement:
+
+Least Recently Used eviction.
+
+Structure:
+
+HashMap
++
+Doubly Linked List
+
+Features:
+
+O(1) lookup
+O(1) eviction
+
+Example:
+
+Memory limit:
+
+1000 keys
+
+When full:
+
+Remove least recently accessed key.
+
+2. Key Expiration
+
+Support:
+
+SET token abc EX 60
+
+Meaning:
+
+Delete after 60 seconds.
+
+Implementation:
+
+priority queue
+background expiration thread
+
+Concepts:
+
+caching
+memory management
+scheduling
+Phase 8: Persistence Layer
+
+Currently:
+
+RAM only
+
+Data disappears after shutdown.
+
+Add durability.
+
+Append Only File (AOF)
+
+Every write operation is recorded.
+
+Example:
+
+SET user Kushal
+
+Stored:
+
+log.txt
+
+After restart:
+
+Read log
+
+↓
+
+Restore database
+Snapshotting
+
+Periodically save database state.
+
+Example:
+
+Memory
+
+   |
+
+Snapshot file
+
+   |
+
+Restart recovery
+
+Concepts:
+
+database durability
+recovery systems
+storage engines
+Phase 9: Performance Benchmarking
+
+Measure TinyKV performance.
+
+Create benchmark tools.
+
+Measure:
+
+Throughput
+
+Requests per second.
+
+Example:
+
+50,000 SET operations/sec
+Latency
+
+Measure:
+
+average response time
+p95 latency
+p99 latency
+Concurrency
+
+Test:
+
+10 clients
+100 clients
+1000 clients
+
+Compare:
+
+TinyKV vs Redis (optional)
+
+Phase 10: Distributed Features
+
+This makes TinyKV a true distributed systems project.
+
+Replication
+
+Architecture:
+
+             Primary
+
+                |
+
+        ----------------
+
+        |              |
+
+    Replica 1      Replica 2
+
+Implement:
+
+primary writes
+replicas synchronize
+data copying
+Sharding
+
+Split data across servers.
+
+Example:
+
+Server 1
+
+Keys A-H
+
+
+Server 2
+
+Keys I-P
+
+
+Server 3
+
+Keys Q-Z
+
+Implement:
+
+consistent hashing
+shard routing
+Fault Handling
+
+Handle:
+
+node failures
+recovery
+replica synchronization
+
+Concepts:
+
+distributed storage
+availability
+scalability
+Phase 11: Testing
+
+Use Google Test.
+
+Test:
+
+Storage
+SET
+GET
+DELETE
+Networking
+client-server communication
+Concurrency
+multiple clients
+Persistence
+restart recovery
+Cache
+eviction logic
+Phase 12: Documentation
+
+Create professional documentation.
+
+README should include:
+
+Architecture Diagram
+
+Explain:
+
+networking
+storage engine
+concurrency model
+Supported Commands
+
+Example:
+
+SET
+GET
+DELETE
+EXPIRE
+Benchmark Results
+
+Example:
+
+100 concurrent clients
+50k operations/sec
+Design Decisions
+
+Explain:
+
+why hash table?
+why thread pool?
+why AOF?
+Final Resume Positioning
+TinyKV — Distributed In-Memory Key-Value Store
+
+Tech Stack: C++17, TCP Sockets, Linux, Multithreading, CMake, Google Test
+
+Resume bullets:
+
+Built a Redis-inspired in-memory key-value database from scratch in C++ supporting SET, GET, DELETE, expiration, and custom command processing.
+Designed a TCP-based client-server architecture with custom protocol handling, supporting concurrent clients through multithreading and thread-safe storage operations.
+Implemented optimized storage mechanisms using hash tables, LRU caching, priority queues, and persistence layers with append-only logs and snapshot recovery.
+Developed distributed storage capabilities including replication, sharding, fault tolerance, and performance benchmarking to explore scalable database architectures.
+Final Learning Outcome
+
+After completing TinyKV, you will understand:
+
+✅ How Redis works internally
+✅ How databases store data
+✅ TCP networking
+✅ Operating system concurrency
+✅ Memory management
+✅ Thread synchronization
+✅ Storage engines
+✅ Persistence and recovery
+✅ Distributed systems design
+✅ Performance optimization
