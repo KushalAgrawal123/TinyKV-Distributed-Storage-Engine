@@ -46,7 +46,7 @@ Every reply is exactly one line, starting with a type prefix:
 `$-1` means "no value" (e.g. `GET` on a missing key) - it is never an
 error.
 
-## Commands (as of Phase 8)
+## Commands (as of Phase 10A)
 
 | Command                  | Arguments        | Reply                                                     |
 |---------------------------|------------------|---------------------------------------------------------------|
@@ -61,6 +61,15 @@ error.
 | `EXPIRE key seconds`      | key, seconds (positive integer) | `:1` if a TTL was set, `:0` if the key doesn't exist |
 | `PERSIST key`             | key              | `:1` if a TTL was removed, `:0` if the key didn't exist or had none |
 | `SAVE`                    | (none)           | `+OK`; immediately snapshots the dataset and resets the AOF |
+| `REPLICAOF host port`     | host, port       | `+OK`; becomes a replica of host:port                          |
+| `REPLICAOF NO ONE`        | literal `NO ONE` | `+OK`; stops replicating and becomes a primary again            |
+| `SYNC`                    | (none)           | internal - see Replication below, not meant to be typed by hand |
+
+Any write command (`SET`, `DEL`, `INCR`, `DECR`, `EXPIRE`, `PERSIST`) sent
+directly by a client to a replica is rejected with
+`-READONLY You can't write against a replica.` instead of being executed.
+`REPLICAOF` itself is always allowed, regardless of current role - that's
+the only way to change or exit replica mode.
 
 ### Persistence
 
@@ -89,6 +98,33 @@ the key holds a value that can't be parsed as an integer. The read,
 modify, and write happen under a single lock in `KVStore::incrementBy`,
 so concurrent `INCR`s on the same key can't lose an update the way a
 separate `GET` then `SET` from the client would.
+
+### Replication
+
+`REPLICAOF host port` connects to a primary and reuses `SYNC`, plus the
+same idea behind the snapshot format above: a replica connection sends
+the single word `SYNC`, and the primary responds not with one reply line
+but with an open-ended stream - first a burst of `SET key value` lines
+covering the whole current dataset, then, with no separator or framing
+between the two, every future write line as it happens. The replica
+doesn't need to tell them apart: both are just command lines, and
+replaying either one through the normal parser/executor pipeline
+reconstructs the same state. This is also why replication has no extra
+config or CLI flags - `REPLICAOF`/`REPLICAOF NO ONE` are the only
+interface, matching how the vision doc's own example describes it.
+
+A replica rejects direct client writes (see the command table above) but
+still applies everything it receives from its primary, and durably
+records it to its own AOF/snapshot the same way a primary would - a
+replica can be killed and restarted and recover its own state without
+needing the primary to still be reachable. It also propagates what it
+applies to any replicas of its own, so chaining works without special
+handling.
+
+If a replica loses its connection to the primary, it retries once a
+second until it reconnects (logged, not fatal). `REPLICAOF NO ONE`
+disconnects from the current primary and returns to being a normal,
+writable primary.
 
 A plain `SET key value` (no `EX`) clears any existing TTL on the key, matching
 the everyday expectation that overwriting a key resets it completely.

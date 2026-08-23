@@ -17,6 +17,11 @@ namespace tinykv {
 // full type is included in command_executor.cpp where it's actually used.
 class PersistenceManager;
 
+// Forward-declared for the same reason as PersistenceManager above: only
+// touched through a pointer (for REPLICAOF), full type used only in
+// command_executor.cpp.
+class ReplicationManager;
+
 // Single shared entry point for executing an already-parsed Command
 // against a KVStore (and its associated ExpiryManager). Always returns a
 // complete, wire-formatted reply line (see docs/PROTOCOL.md) and never
@@ -34,6 +39,11 @@ class CommandExecutor {
   // already exist).
   void setPersistence(PersistenceManager* persistence);
 
+  // Wires up REPLICAOF/REPLICAOF NO ONE; same post-construction pattern
+  // as setPersistence(), and for the same reason (ReplicationManager
+  // isn't constructed yet when CommandExecutor is).
+  void setReplication(ReplicationManager* replication);
+
   std::string execute(const Command& cmd);
 
   // Telemetry, safe to read from any thread while execute() runs
@@ -46,6 +56,7 @@ class CommandExecutor {
   KVStore& store_;
   ExpiryManager& expiry_;
   PersistenceManager* persistence_ = nullptr;
+  ReplicationManager* replication_ = nullptr;
   std::atomic<uint64_t> totalCommands_{0};
   std::atomic<uint64_t> totalHits_{0};
   std::atomic<uint64_t> totalMisses_{0};

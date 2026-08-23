@@ -14,6 +14,7 @@ std::string ok();
 std::string bulk(const std::string& value);
 std::string nil();
 std::string error(const std::string& message);
+std::string readOnlyError();
 std::string integer(long long value);
 
 }  // namespace Reply

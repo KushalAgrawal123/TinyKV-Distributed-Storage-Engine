@@ -14,6 +14,9 @@ set(TINYKV_CORE_SOURCES
     persistence/aof.cpp
     persistence/snapshot.cpp
     persistence/persistence_manager.cpp
+    replication/replica_registry.cpp
+    replication/replica_link.cpp
+    replication/replication_manager.cpp
 )
 
 add_library(tinykv_core STATIC ${TINYKV_CORE_SOURCES})

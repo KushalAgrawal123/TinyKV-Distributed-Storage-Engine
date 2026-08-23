@@ -7,6 +7,7 @@
 
 #include "tinykv/persistence/persistence_manager.hpp"
 #include "tinykv/protocol/reply.hpp"
+#include "tinykv/replication/replication_manager.hpp"
 
 namespace tinykv {
 
@@ -56,6 +57,8 @@ bool parsePositiveSeconds(const std::string& s, long long& outSeconds) {
 CommandExecutor::CommandExecutor(KVStore& store, ExpiryManager& expiry) : store_(store), expiry_(expiry) {}
 
 void CommandExecutor::setPersistence(PersistenceManager* persistence) { persistence_ = persistence; }
+
+void CommandExecutor::setReplication(ReplicationManager* replication) { replication_ = replication; }
 
 std::string CommandExecutor::execute(const Command& cmd) {
   ++totalCommands_;
@@ -143,6 +146,31 @@ std::string CommandExecutor::execute(const Command& cmd) {
       persistence_->save();
       return Reply::ok();
     }
+    case CommandType::REPLICAOF: {
+      if (cmd.args.size() != 2) return arityError(cmd);
+      if (replication_ == nullptr) {
+        return Reply::error("replication is not enabled");
+      }
+      if (equalsIgnoreCase(cmd.args[0], "NO") && equalsIgnoreCase(cmd.args[1], "ONE")) {
+        replication_->replicaOfNoOne();
+        return Reply::ok();
+      }
+      int port = 0;
+      try {
+        port = std::stoi(cmd.args[1]);
+      } catch (...) {
+        return Reply::error("invalid port in 'REPLICAOF' command");
+      }
+      replication_->replicaOf(cmd.args[0], port);
+      return Reply::ok();
+    }
+    case CommandType::SYNC:
+      // Handled entirely by the connection handler before a Command ever
+      // reaches execute() (a SYNC connection stops being a normal
+      // request/response client and becomes a replica stream). Reachable
+      // here only if SYNC shows up somewhere unexpected, e.g. hand-edited
+      // into an AOF file.
+      return Reply::error("SYNC is only valid as the first line of a fresh connection");
     case CommandType::UNKNOWN:
     default:
       return Reply::error("unknown command '" + cmd.name + "'");

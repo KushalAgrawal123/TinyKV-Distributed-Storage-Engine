@@ -4,6 +4,13 @@
 
 namespace tinykv {
 
+// Writes the exact bytes in data to fd, retrying on partial writes.
+// Returns false on error. Used directly for a pre-formatted multi-line
+// blob (e.g. a replication SYNC snapshot dump, where each line already
+// carries its own '\n'); writeLine below is just this plus one line's
+// terminator.
+bool writeRaw(int fd, const std::string& data);
+
 // Writes `line` followed by the protocol's '\n' terminator to fd, retrying
 // on partial writes. Returns false on error.
 bool writeLine(int fd, const std::string& line);

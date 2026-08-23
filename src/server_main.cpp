@@ -1,5 +1,6 @@
 #include <csignal>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include "tinykv/command_executor.hpp"
@@ -9,8 +10,10 @@
 #include "tinykv/net/line_protocol.hpp"
 #include "tinykv/net/tcp_server.hpp"
 #include "tinykv/persistence/persistence_manager.hpp"
+#include "tinykv/persistence/snapshot.hpp"
 #include "tinykv/protocol/parser.hpp"
 #include "tinykv/protocol/reply.hpp"
+#include "tinykv/replication/replication_manager.hpp"
 #include "tinykv/storage/expiry_manager.hpp"
 #include "tinykv/storage/kv_store.hpp"
 
@@ -37,7 +40,61 @@ Args parseArgs(int argc, char** argv) {
   return args;
 }
 
-void handleConnection(tinykv::CommandExecutor& executor, tinykv::PersistenceManager& persistence, int clientFd) {
+// Shared by the live connection handler (a direct client write on a
+// primary) and the replication apply callback (a line replayed from
+// this server's own primary): if the command actually mutated data,
+// record it for durability and forward it to any of THIS server's own
+// registered replicas. Applying this uniformly regardless of where the
+// write came from is what makes chained replication (a replica with its
+// own downstream replicas) work without any extra plumbing.
+void recordAndPropagateIfWrite(tinykv::PersistenceManager& persistence, tinykv::ReplicationManager& replication,
+                                const tinykv::Command& cmd, const std::string& line, const std::string& response) {
+  bool succeeded = !response.empty() && response[0] != '-';
+  if (succeeded && tinykv::isWriteCommand(cmd.type)) {
+    persistence.recordWrite(line);
+    replication.registry().propagate(line);
+  }
+}
+
+// A connection that sent SYNC stops being a normal request/response
+// client and becomes a one-way replica stream: register it, dump the
+// current dataset as a burst of SET lines (the same format - and the
+// same replay pipeline on the other end - as every future propagated
+// write), then just watch for disconnection.
+//
+// Registering before dumping guarantees no write committed after this
+// point is ever missed by the new replica, at the acceptable cost of a
+// narrow race: a write landing in the exact instant of the dump could
+// both appear in it AND be separately propagated. SET/DEL are idempotent
+// under that; INCR/DECR in that same tiny window are not. Fixing that
+// fully would mean sharing a lock with KVStore's own internals, which is
+// more machinery than this trade-off is worth.
+void handleSyncConnection(tinykv::KVStore& store, tinykv::ReplicationManager& replication, int clientFd) {
+  replication.registry().add(clientFd);
+  LOG_INFO("Replica connected for SYNC (fd " + std::to_string(clientFd) + ", " +
+           std::to_string(replication.registry().size()) + " replica(s) now attached)");
+
+  std::ostringstream snapshotBuffer;
+  tinykv::SnapshotManager::save(snapshotBuffer, store);
+  if (!tinykv::writeRaw(clientFd, snapshotBuffer.str())) {
+    replication.registry().remove(clientFd);
+    return;
+  }
+
+  // A replica doesn't send anything more after SYNC; keep reading (and
+  // discarding) just to detect when it disconnects.
+  tinykv::LineReader reader;
+  std::string line;
+  while (reader.readLine(clientFd, line)) {
+  }
+
+  replication.registry().remove(clientFd);
+  LOG_INFO("Replica disconnected (fd " + std::to_string(clientFd) + ")");
+}
+
+void handleConnection(tinykv::KVStore& store, tinykv::CommandExecutor& executor,
+                       tinykv::PersistenceManager& persistence, tinykv::ReplicationManager& replication,
+                       int clientFd) {
   tinykv::LineReader reader;
   std::string line;
   while (reader.readLine(clientFd, line)) {
@@ -45,24 +102,26 @@ void handleConnection(tinykv::CommandExecutor& executor, tinykv::PersistenceMana
       continue;
     }
 
-    std::string response;
-    bool parsed = false;
     tinykv::Command cmd;
     try {
       cmd = tinykv::Parser::parse(line);
-      parsed = true;
-      response = executor.execute(cmd);
     } catch (const tinykv::ProtocolError& e) {
-      response = tinykv::Reply::error(e.what());
+      if (!tinykv::writeLine(clientFd, tinykv::Reply::error(e.what()))) break;
+      continue;
     }
 
-    // Only a successfully-executed write command is durable state that
-    // needs replaying on recovery; a failed SET (e.g. wrong arity) never
-    // touched the store, so it must not go in the AOF either.
-    bool succeeded = parsed && (response.empty() || response[0] != '-');
-    if (succeeded && tinykv::isWriteCommand(cmd.type)) {
-      persistence.recordWrite(line);
+    if (cmd.type == tinykv::CommandType::SYNC) {
+      handleSyncConnection(store, replication, clientFd);
+      return;  // this connection is now a replica stream, not a client
     }
+
+    if (tinykv::isWriteCommand(cmd.type) && replication.role() == tinykv::ServerRole::REPLICA) {
+      if (!tinykv::writeLine(clientFd, tinykv::Reply::readOnlyError())) break;
+      continue;
+    }
+
+    std::string response = executor.execute(cmd);
+    recordAndPropagateIfWrite(persistence, replication, cmd, line, response);
 
     if (!tinykv::writeLine(clientFd, response)) {
       break;
@@ -109,25 +168,40 @@ int main(int argc, char** argv) {
            (persistConfig.appendOnly ? "yes" : "no") + ")");
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Server v0.8 (Phase 8)\n";
+  std::cout << "  TinyKV Server v0.10a (Phase 10A)\n";
   std::cout << "  Redis-inspired KV store in C++17\n";
   std::cout << "==================================\n";
   std::cout << "Listening on port " << port << "\n";
   std::cout << "Connect with: nc localhost " << port << "   or   tinykv-cli\n";
   std::cout << "Commands: SET key value [EX seconds] | GET key | DEL key | PING\n";
   std::cout << "          INCR key | DECR key | TTL key | EXPIRE key seconds | PERSIST key | SAVE\n";
-  std::cout << "(multi-client, thread-safe, LRU-capped, expiring keys, durable via AOF+snapshot)\n\n";
+  std::cout << "          REPLICAOF host port | REPLICAOF NO ONE\n";
+  std::cout << "(multi-client, thread-safe, LRU-capped, expiring keys, durable, replicated)\n\n";
 
   // Declaration order matters: destruction happens in reverse. store must
-  // outlive expiryManager's background thread (its onExpire callback
-  // captures &store) and persistence's background timer (which touches
-  // store_ and executor_ through references it was constructed with).
+  // outlive expiryManager's/persistence's background threads, and both
+  // executor and persistence must outlive replication - its destructor
+  // stops (and joins) any active ReplicaLink, whose thread calls the
+  // apply callback below, which touches executor and persistence.
   tinykv::KVStore store(maxKeys);
   tinykv::ExpiryManager expiryManager;
   tinykv::CommandExecutor executor(store, expiryManager);
   tinykv::ThreadPool backgroundPool(2);
   tinykv::PersistenceManager persistence(persistConfig, store, executor, backgroundPool);
   executor.setPersistence(&persistence);
+
+  tinykv::ReplicationManager replication;
+  executor.setReplication(&replication);
+  replication.setApplyCallback([&](const std::string& line) {
+    try {
+      tinykv::Command cmd = tinykv::Parser::parse(line);
+      std::string response = executor.execute(cmd);
+      recordAndPropagateIfWrite(persistence, replication, cmd, line, response);
+    } catch (const tinykv::ProtocolError&) {
+      // A malformed line from our own primary shouldn't happen; skip it
+      // defensively rather than tearing down the replication link.
+    }
+  });
 
   tinykv::TcpServer server(port);
 
@@ -137,7 +211,7 @@ int main(int argc, char** argv) {
   });
 
   // Recovery must finish before the server starts accepting connections,
-  // so no client can observe a partially-restored dataset.
+  // so no client (or replica) can observe a partially-restored dataset.
   persistence.recover();
 
   if (!server.start()) {
@@ -151,7 +225,7 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, handleShutdownSignal);
   std::signal(SIGTERM, handleShutdownSignal);
 
-  server.run([&executor, &persistence](int clientFd) { handleConnection(executor, persistence, clientFd); });
+  server.run([&](int clientFd) { handleConnection(store, executor, persistence, replication, clientFd); });
 
   LOG_INFO("TinyKV server shutting down");
   return 0;

@@ -14,16 +14,17 @@ constexpr size_t kMaxLineLength = 8192;
 
 }  // namespace
 
-bool writeLine(int fd, const std::string& line) {
-  std::string withTerminator = line + "\n";
+bool writeRaw(int fd, const std::string& data) {
   size_t totalSent = 0;
-  while (totalSent < withTerminator.size()) {
-    ssize_t sent = send(fd, withTerminator.data() + totalSent, withTerminator.size() - totalSent, 0);
+  while (totalSent < data.size()) {
+    ssize_t sent = send(fd, data.data() + totalSent, data.size() - totalSent, 0);
     if (sent <= 0) return false;
     totalSent += static_cast<size_t>(sent);
   }
   return true;
 }
+
+bool writeLine(int fd, const std::string& line) { return writeRaw(fd, line + "\n"); }
 
 bool LineReader::readLine(int fd, std::string& outLine) {
   while (true) {
