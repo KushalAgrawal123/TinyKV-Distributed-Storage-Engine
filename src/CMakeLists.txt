@@ -1,6 +1,7 @@
 set(TINYKV_CORE_SOURCES
     logger.cpp
     config.cpp
+    storage/kv_store.cpp
 )
 
 add_library(tinykv_core STATIC ${TINYKV_CORE_SOURCES})
