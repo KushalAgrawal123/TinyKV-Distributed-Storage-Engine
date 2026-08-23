@@ -4,6 +4,16 @@
 
 namespace tinykv {
 
+namespace {
+
+// Matches the protocol's max request line length (docs/PROTOCOL.md). A
+// client that never sends '\n' would otherwise make buffer_ grow without
+// bound; that's a framing-level concern, so it's enforced here rather than
+// in Parser, which never even runs until a full line has been buffered.
+constexpr size_t kMaxLineLength = 8192;
+
+}  // namespace
+
 bool writeLine(int fd, const std::string& line) {
   std::string withTerminator = line + "\n";
   size_t totalSent = 0;
@@ -24,6 +34,8 @@ bool LineReader::readLine(int fd, std::string& outLine) {
       buffer_.erase(0, newlinePos + 1);
       return true;
     }
+
+    if (buffer_.size() > kMaxLineLength) return false;
 
     char chunk[4096];
     ssize_t received = recv(fd, chunk, sizeof(chunk), 0);

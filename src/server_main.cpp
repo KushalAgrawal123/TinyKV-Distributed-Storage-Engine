@@ -1,11 +1,13 @@
 #include <iostream>
-#include <sstream>
 #include <string>
 
+#include "tinykv/command_executor.hpp"
 #include "tinykv/config.hpp"
 #include "tinykv/logger.hpp"
 #include "tinykv/net/line_protocol.hpp"
 #include "tinykv/net/tcp_server.hpp"
+#include "tinykv/protocol/parser.hpp"
+#include "tinykv/protocol/reply.hpp"
 #include "tinykv/storage/kv_store.hpp"
 
 namespace {
@@ -28,46 +30,23 @@ Args parseArgs(int argc, char** argv) {
   return args;
 }
 
-// Temporary, ad hoc command dispatch: whitespace-split, straight to
-// KVStore. No real parser/validation yet - replaced by the Parser and
-// CommandExecutor in Phase 4.
-std::string dispatch(tinykv::KVStore& store, const std::string& line) {
-  std::istringstream iss(line);
-  std::string command;
-  iss >> command;
-
-  if (command.empty()) {
-    return "";
-  }
-  if (command == "SET") {
-    std::string key, value;
-    iss >> key >> value;
-    if (key.empty() || value.empty()) return "ERROR wrong number of arguments for SET";
-    store.set(key, value);
-    return "OK";
-  }
-  if (command == "GET") {
-    std::string key;
-    iss >> key;
-    if (key.empty()) return "ERROR wrong number of arguments for GET";
-    auto value = store.get(key);
-    return value.has_value() ? *value : "(nil)";
-  }
-  if (command == "DEL") {
-    std::string key;
-    iss >> key;
-    if (key.empty()) return "ERROR wrong number of arguments for DEL";
-    return store.del(key) ? "1" : "0";
-  }
-  return "ERROR unknown command '" + command + "'";
-}
-
-void handleConnection(tinykv::KVStore& store, int clientFd) {
+void handleConnection(tinykv::CommandExecutor& executor, int clientFd) {
   tinykv::LineReader reader;
   std::string line;
   while (reader.readLine(clientFd, line)) {
-    std::string response = dispatch(store, line);
-    if (!response.empty() && !tinykv::writeLine(clientFd, response)) {
+    if (line.empty()) {
+      continue;
+    }
+
+    std::string response;
+    try {
+      tinykv::Command cmd = tinykv::Parser::parse(line);
+      response = executor.execute(cmd);
+    } catch (const tinykv::ProtocolError& e) {
+      response = tinykv::Reply::error(e.what());
+    }
+
+    if (!tinykv::writeLine(clientFd, response)) {
       break;
     }
   }
@@ -89,14 +68,16 @@ int main(int argc, char** argv) {
   LOG_INFO("Port: " + std::to_string(port));
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Server v0.3 (Phase 3)\n";
+  std::cout << "  TinyKV Server v0.4 (Phase 4)\n";
   std::cout << "  Redis-inspired KV store in C++17\n";
   std::cout << "==================================\n";
   std::cout << "Listening on port " << port << "\n";
   std::cout << "Connect with: nc localhost " << port << "   or   tinykv-cli\n";
+  std::cout << "Commands: SET key value | GET key | DEL key | PING\n";
   std::cout << "(one client at a time for now - see Phase 5 for concurrency)\n\n";
 
   tinykv::KVStore store;
+  tinykv::CommandExecutor executor(store);
   tinykv::TcpServer server(port);
 
   if (!server.start()) {
@@ -104,7 +85,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  server.run([&store](int clientFd) { handleConnection(store, clientFd); });
+  server.run([&executor](int clientFd) { handleConnection(executor, clientFd); });
 
   LOG_INFO("TinyKV server shutting down");
   return 0;
