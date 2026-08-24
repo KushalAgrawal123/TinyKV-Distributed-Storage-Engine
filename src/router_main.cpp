@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
   LOG_INFO(std::to_string(shardIds.size()) + " shard(s) configured");
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Router v0.10c (Phase 10C)\n";
+  std::cout << "  TinyKV Router\n";
   std::cout << "==================================\n";
   std::cout << "Listening on port " << port << "\n";
   std::cout << "Shards: " << shardIds.size() << " (topology: " << topologyPath << ")\n";

@@ -40,6 +40,17 @@ Args parseArgs(int argc, char** argv) {
   return args;
 }
 
+// Case-sensitive on purpose, matching tinykv.conf's documented values
+// exactly (DEBUG/INFO/WARN/ERROR) - an unrecognized value falls back to
+// INFO rather than erroring, since a bad log_level shouldn't stop the
+// server from starting.
+tinykv::LogLevel parseLogLevel(const std::string& level) {
+  if (level == "DEBUG") return tinykv::LogLevel::DEBUG;
+  if (level == "WARN") return tinykv::LogLevel::WARN;
+  if (level == "ERROR") return tinykv::LogLevel::ERROR;
+  return tinykv::LogLevel::INFO;
+}
+
 // Shared by the live connection handler (a direct client write on a
 // primary) and the replication apply callback (a line replayed from
 // this server's own primary): if the command actually mutated data,
@@ -159,7 +170,7 @@ int main(int argc, char** argv) {
   persistConfig.appendFilename = config.getString("appendfilename", "tinykv.aof");
   persistConfig.saveIntervalSeconds = config.getInt("save_interval", 300);
 
-  tinykv::Logger::init(tinykv::LogLevel::INFO);
+  tinykv::Logger::init(parseLogLevel(config.getString("log_level", "INFO")));
   LOG_INFO("TinyKV server starting up");
   LOG_INFO("Config file: " + args.configPath);
   LOG_INFO("Port: " + std::to_string(port));
@@ -168,7 +179,7 @@ int main(int argc, char** argv) {
            (persistConfig.appendOnly ? "yes" : "no") + ")");
 
   std::cout << "==================================\n";
-  std::cout << "  TinyKV Server v0.10a (Phase 10A)\n";
+  std::cout << "  TinyKV Server\n";
   std::cout << "  Redis-inspired KV store in C++17\n";
   std::cout << "==================================\n";
   std::cout << "Listening on port " << port << "\n";
@@ -176,7 +187,7 @@ int main(int argc, char** argv) {
   std::cout << "Commands: SET key value [EX seconds] | GET key | DEL key | PING\n";
   std::cout << "          INCR key | DECR key | TTL key | EXPIRE key seconds | PERSIST key | SAVE\n";
   std::cout << "          REPLICAOF host port | REPLICAOF NO ONE\n";
-  std::cout << "(multi-client, thread-safe, LRU-capped, expiring keys, durable, replicated)\n\n";
+  std::cout << "(multi-client, thread-safe, LRU-capped, expiring keys, durable, replicated - see docs/PROTOCOL.md)\n\n";
 
   // Declaration order matters: destruction happens in reverse. store must
   // outlive expiryManager's/persistence's background threads, and both
