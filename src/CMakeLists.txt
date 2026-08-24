@@ -17,6 +17,8 @@ set(TINYKV_CORE_SOURCES
     replication/replica_registry.cpp
     replication/replica_link.cpp
     replication/replication_manager.cpp
+    sharding/consistent_hash_ring.cpp
+    sharding/router.cpp
 )
 
 add_library(tinykv_core STATIC ${TINYKV_CORE_SOURCES})
@@ -34,3 +36,6 @@ target_link_libraries(tinykv-server PRIVATE tinykv_core)
 
 add_executable(tinykv-cli cli_main.cpp)
 target_link_libraries(tinykv-cli PRIVATE tinykv_core)
+
+add_executable(tinykv-router router_main.cpp)
+target_link_libraries(tinykv-router PRIVATE tinykv_core)

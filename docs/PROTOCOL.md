@@ -46,7 +46,7 @@ Every reply is exactly one line, starting with a type prefix:
 `$-1` means "no value" (e.g. `GET` on a missing key) - it is never an
 error.
 
-## Commands (as of Phase 10A)
+## Commands (as of Phase 10B)
 
 | Command                  | Arguments        | Reply                                                     |
 |---------------------------|------------------|---------------------------------------------------------------|
@@ -64,6 +64,7 @@ error.
 | `REPLICAOF host port`     | host, port       | `+OK`; becomes a replica of host:port                          |
 | `REPLICAOF NO ONE`        | literal `NO ONE` | `+OK`; stops replicating and becomes a primary again            |
 | `SYNC`                    | (none)           | internal - see Replication below, not meant to be typed by hand |
+| `ROUTE key`                | key              | `+<host>:<port>`; **only valid against `tinykv-router`**, see Sharding below |
 
 Any write command (`SET`, `DEL`, `INCR`, `DECR`, `EXPIRE`, `PERSIST`) sent
 directly by a client to a replica is rejected with
@@ -134,6 +135,56 @@ background sweeper (see `ExpiryManager`) that sleeps until the next real
 deadline rather than polling; a `TTL` of `0` or a negative `seconds`
 argument to `SET ... EX`/`EXPIRE` is rejected as an error rather than
 supported.
+
+### Sharding & routing
+
+`tinykv-router` is a separate executable that sits in front of a fixed
+set of ordinary, unmodified `tinykv-server` instances ("shards") listed
+in `router.conf`'s `backends` line. It speaks the exact same wire
+protocol as a normal server, so an existing client can't tell the
+difference except for one extra command:
+
+- For any command whose first argument is a key (`SET`, `GET`, `DEL`,
+  `INCR`, `DECR`, `TTL`, `EXPIRE`, `PERSIST`), the router extracts that
+  key, decides which shard owns it, and transparently forwards the exact
+  request line to that shard's `tinykv-server`, relaying the reply back
+  unmodified. The client never talks to a shard directly.
+- `ROUTE key` doesn't forward anything - it just answers with the
+  `host:port` of the shard that owns `key`, using the identical decision
+  the forwarding path itself uses (they share one `nodeForKey()`, so the
+  two can't disagree). Handy for verifying where a key actually lives.
+- `PING` is answered locally by the router (it carries no key to route
+  by). Any other command with no arguments, `ROUTE` with the wrong arity,
+  or an unavailable shard produces a normal `-ERR ...` reply rather than
+  dropping the connection.
+
+Which shard owns which keys is decided by a **consistent hash ring**
+(`ConsistentHashRing`, keyed by a 64-bit FNV-1a hash with a
+MurmurHash3-style finalizing mix for better bit diffusion on short keys):
+each shard address is given 150 "virtual node" positions scattered
+around the ring, and a key belongs to the nearest virtual node clockwise
+from the key's own hash position. This is the reason to prefer consistent
+hashing over naive `hash(key) % shard_count`: adding or removing a shard
+only remaps the fraction of keys that fell between that shard's virtual
+positions and their new neighbors, not the entire keyspace.
+
+The shard list is static, read once from `router.conf` at startup -
+there's no dynamic membership or automatic data rebalancing. Adding a
+4th shard to a running deployment means restarting the router with the
+new `backends` line; existing data physically stays on whichever shard
+originally received it; only the *routing decision* for a given key can
+change, so a small number of keys will (correctly, if perhaps
+surprisingly) appear to "disappear" under the new routing until they're
+re-written. Fault tolerance and automatic promotion of a failed shard's
+replica are Phase 10C, not this phase - a shard being down here just
+means requests routed to it fail with `-ERR shard <addr> unavailable`
+until it (or the router) is restarted, while every other shard keeps
+working normally.
+
+The router keeps one persistent, mutex-guarded connection per shard
+(reused across all client connections) rather than opening a fresh
+connection per request; a broken connection is dropped and transparently
+reopened on the next request routed to that shard.
 
 Wrong argument counts and unknown commands both produce a `-ERR ...`
 reply; the connection is never dropped because of bad input.

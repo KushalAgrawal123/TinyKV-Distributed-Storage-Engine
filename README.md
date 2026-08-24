@@ -14,11 +14,12 @@ cmake ..
 make
 ```
 
-This produces two executables under `build/src/`:
+This produces executables under `build/src/`:
 - `tinykv-server` — the TinyKV server
 - `tinykv-cli` — a client for talking to the server
+- `tinykv-router` — a sharding-aware reverse proxy in front of multiple `tinykv-server` shards (`--config router.conf`, default port 7000; see `docs/PROTOCOL.md`)
 
-Both currently accept `--config <path>` (default: `tinykv.conf`) and `--port <n>` (overrides the config file).
+`tinykv-server`/`tinykv-cli` accept `--config <path>` (default: `tinykv.conf`) and `--port <n>` (overrides the config file); `tinykv-router` accepts the same, defaulting to `router.conf`.
 
 ## Project layout
 

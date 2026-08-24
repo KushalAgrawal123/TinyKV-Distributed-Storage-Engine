@@ -12,10 +12,12 @@ PASS=0
 FAIL=0
 
 cleanup() {
-  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null
-    wait "$SERVER_PID" 2>/dev/null
-  fi
+  for pid in "${SERVER_PID:-}" "${SHARD_PIDS[@]:-}" "${ROUTER_PID:-}"; do
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+    fi
+  done
 }
 trap cleanup EXIT
 
@@ -61,15 +63,18 @@ if ! nc -z "$HOST" "$PORT" 2>/dev/null; then
   exit 1
 fi
 
-# check <description> <input> <expected-output>
+# check <description> <input> <expected-output> [port]
 # Each call opens its own connection (printf | nc), so a full smoke run
-# also exercises the server accepting many sequential clients.
+# also exercises the server accepting many sequential clients. [port]
+# defaults to the main server's $PORT; the sharding checks pass
+# $ROUTER_PORT explicitly to target the router instead.
 check() {
   local description="$1"
   local input="$2"
   local expected="$3"
+  local target_port="${4:-$PORT}"
   local actual
-  actual="$(printf '%b' "$input" | nc -w 2 "$HOST" "$PORT")"
+  actual="$(printf '%b' "$input" | nc -w 2 "$HOST" "$target_port")"
   if [[ "$actual" == "$expected" ]]; then
     echo "  [PASS] $description"
     PASS=$((PASS + 1))
@@ -153,6 +158,99 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$CONCURRENT_DIR"
+
+echo "==> Sharding & routing checks (Phase 10B)"
+SHARD_BASE_PORT=$((PORT + 1))
+ROUTER_PORT=$((PORT + 10))
+SHARD_PIDS=()
+SHARD_ADDRS=()
+for i in 0 1 2; do
+  shard_port=$((SHARD_BASE_PORT + i))
+  shard_dir="$BUILD_DIR/smoke_test_shard_$shard_port"
+  rm -rf "$shard_dir"
+  mkdir -p "$shard_dir"
+  shard_conf="$BUILD_DIR/smoke_test_shard_$shard_port.conf"
+  cat > "$shard_conf" <<EOF
+port=$shard_port
+dir=$shard_dir
+appendonly=false
+save_interval=0
+EOF
+  "$BUILD_DIR/src/tinykv-server" --config "$shard_conf" > "$BUILD_DIR/smoke_test_shard_$shard_port.log" 2>&1 &
+  SHARD_PIDS+=("$!")
+  SHARD_ADDRS+=("$HOST:$shard_port")
+done
+
+ROUTER_CONF="$BUILD_DIR/smoke_test_router.conf"
+{
+  echo "port=$ROUTER_PORT"
+  IFS=,; echo "backends=${SHARD_ADDRS[*]}"; unset IFS
+} > "$ROUTER_CONF"
+"$BUILD_DIR/src/tinykv-router" --config "$ROUTER_CONF" > "$BUILD_DIR/smoke_test_router.log" 2>&1 &
+ROUTER_PID=$!
+
+SHARDING_READY=1
+for p in "${SHARD_BASE_PORT}" "$((SHARD_BASE_PORT + 1))" "$((SHARD_BASE_PORT + 2))" "$ROUTER_PORT"; do
+  ok=0
+  for _ in $(seq 1 50); do
+    nc -z "$HOST" "$p" 2>/dev/null && { ok=1; break; }
+    sleep 0.1
+  done
+  [[ "$ok" -eq 1 ]] || SHARDING_READY=0
+done
+
+if [[ "$SHARDING_READY" -ne 1 ]]; then
+  echo "  [FAIL] shards/router didn't start - see $BUILD_DIR/smoke_test_router.log"
+  FAIL=$((FAIL + 1))
+else
+  routeCheck() {
+    local description="$1" key="$2"
+    local node
+    node="$(printf 'ROUTE %s\n' "$key" | nc -w 2 "$HOST" "$ROUTER_PORT")"
+    if [[ "$node" =~ ^\+$HOST:[0-9]+$ ]]; then
+      echo "  [PASS] $description ($node)"
+      PASS=$((PASS + 1))
+    else
+      echo "  [FAIL] $description (got: $node)"
+      FAIL=$((FAIL + 1))
+    fi
+  }
+
+  check "SET through the router" "SET shardkey shardval\n" '+OK' "$ROUTER_PORT"
+  check "GET through the router returns the value" 'GET shardkey\n' '+shardval' "$ROUTER_PORT"
+  routeCheck "ROUTE reports a valid shard address" 'shardkey'
+  check "PING through the router is answered locally" 'PING\n' '+OK' "$ROUTER_PORT"
+  check "ROUTE with wrong arity errors" 'ROUTE\n' "-ERR wrong number of arguments for 'ROUTE'" "$ROUTER_PORT"
+  check "ROUTE sent directly to a shard is rejected" 'ROUTE x\n' "-ERR ROUTE is only valid against tinykv-router, not tinykv-server" "$SHARD_BASE_PORT"
+
+  # Consistency: the shard ROUTE names must be the one actually holding
+  # the value - write and read 12 distinct keys directly through the
+  # router, then read each one straight from the shard ROUTE reported.
+  DIRECT_OK=1
+  for i in $(seq 1 12); do
+    printf 'SET rkey%d rval%d\n' "$i" "$i" | nc -w 2 "$HOST" "$ROUTER_PORT" > /dev/null
+  done
+  for i in $(seq 1 12); do
+    node="$(printf 'ROUTE rkey%d\n' "$i" | nc -w 2 "$HOST" "$ROUTER_PORT")"
+    node="${node#+}"
+    shard_host="${node%:*}"
+    shard_port="${node#*:}"
+    direct="$(printf 'GET rkey%d\n' "$i" | nc -w 2 "$shard_host" "$shard_port")"
+    [[ "$direct" == "+rval$i" ]] || DIRECT_OK=0
+  done
+  if [[ "$DIRECT_OK" -eq 1 ]]; then
+    echo "  [PASS] 12/12 keys found directly on the shard ROUTE reported"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] at least one key wasn't found directly on the shard ROUTE reported"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+for pid in "${SHARD_PIDS[@]}"; do kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; done
+kill "$ROUTER_PID" 2>/dev/null; wait "$ROUTER_PID" 2>/dev/null
+SHARD_PIDS=()
+ROUTER_PID=""
 
 echo ""
 echo "$PASS passed, $FAIL failed"

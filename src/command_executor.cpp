@@ -171,6 +171,11 @@ std::string CommandExecutor::execute(const Command& cmd) {
       // here only if SYNC shows up somewhere unexpected, e.g. hand-edited
       // into an AOF file.
       return Reply::error("SYNC is only valid as the first line of a fresh connection");
+    case CommandType::ROUTE:
+      // ROUTE is a tinykv-router introspection command (see
+      // Router::handleConnection) - it never reaches a plain
+      // tinykv-server's CommandExecutor in normal use.
+      return Reply::error("ROUTE is only valid against tinykv-router, not tinykv-server");
     case CommandType::UNKNOWN:
     default:
       return Reply::error("unknown command '" + cmd.name + "'");

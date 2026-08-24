@@ -41,6 +41,7 @@ CommandType commandTypeFromName(const std::string& name) {
   if (upper == "SAVE") return CommandType::SAVE;
   if (upper == "REPLICAOF") return CommandType::REPLICAOF;
   if (upper == "SYNC") return CommandType::SYNC;
+  if (upper == "ROUTE") return CommandType::ROUTE;
   return CommandType::UNKNOWN;
 }
 
