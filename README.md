@@ -21,6 +21,19 @@ This produces executables under `build/src/`:
 
 `tinykv-server`/`tinykv-cli` accept `--config <path>` (default: `tinykv.conf`) and `--port <n>` (overrides the config file); `tinykv-router` accepts the same, defaulting to `router.conf`.
 
+## Testing
+
+Requires [Google Test](https://github.com/google/googletest) (`brew install googletest`). With that installed, re-run `cmake ..` once to pick it up, then:
+
+```bash
+cd build
+ctest --output-on-failure
+```
+
+40 tests across five categories - storage (`test_storage.cpp`), the LRU cache and TTL expiration (`test_cache.cpp`), real-socket request/response networking (`test_networking.cpp`), concurrent/thread-safety races (`test_concurrency.cpp`), and AOF/snapshot persistence (`test_persistence.cpp`). Each networking test spins up its own real `TcpServer` on a fixed high port and talks to it over an actual socket via `TcpClient`; each persistence test gets its own scratch directory under the OS temp dir. Distributed features (replication, sharding, failover - Phases 10A/10B/10C) are intentionally left to `scripts/smoke_test.sh` instead: those scenarios are multi-process kill/restart tests that fit scripted, real-process verification better than fast in-process unit tests.
+
+`scripts/smoke_test.sh` remains the broader end-to-end regression check (protocol, persistence, concurrency, and the full sharding/replication/failover flow against real running processes) and should still be run after any change.
+
 ## Project layout
 
 ```
