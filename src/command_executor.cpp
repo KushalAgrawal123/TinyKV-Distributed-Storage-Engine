@@ -176,6 +176,10 @@ std::string CommandExecutor::execute(const Command& cmd) {
       // Router::handleConnection) - it never reaches a plain
       // tinykv-server's CommandExecutor in normal use.
       return Reply::error("ROUTE is only valid against tinykv-router, not tinykv-server");
+    case CommandType::NODES:
+      // Same as ROUTE above: NODES is answered entirely by the router
+      // from its ShardTopology, never forwarded to a shard.
+      return Reply::error("NODES is only valid against tinykv-router, not tinykv-server");
     case CommandType::UNKNOWN:
     default:
       return Reply::error("unknown command '" + cmd.name + "'");

@@ -17,7 +17,7 @@ make
 This produces executables under `build/src/`:
 - `tinykv-server` — the TinyKV server
 - `tinykv-cli` — a client for talking to the server
-- `tinykv-router` — a sharding-aware reverse proxy in front of multiple `tinykv-server` shards (`--config router.conf`, default port 7000; see `docs/PROTOCOL.md`)
+- `tinykv-router` — a sharding-aware reverse proxy in front of multiple `tinykv-server` shards, each optionally replicated for automatic failover (`--config router.conf`, default port 7000; shard/primary/replica layout comes from `topology.conf`; see `docs/PROTOCOL.md`)
 
 `tinykv-server`/`tinykv-cli` accept `--config <path>` (default: `tinykv.conf`) and `--port <n>` (overrides the config file); `tinykv-router` accepts the same, defaulting to `router.conf`.
 

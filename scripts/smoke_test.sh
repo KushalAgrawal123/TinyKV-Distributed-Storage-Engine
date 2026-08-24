@@ -12,7 +12,7 @@ PASS=0
 FAIL=0
 
 cleanup() {
-  for pid in "${SERVER_PID:-}" "${SHARD_PIDS[@]:-}" "${ROUTER_PID:-}"; do
+  for pid in "${SERVER_PID:-}" "${SHARDING_PIDS[@]:-}" "${ROUTER_PID:-}"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null
@@ -20,6 +20,7 @@ cleanup() {
   done
 }
 trap cleanup EXIT
+SHARDING_PIDS=()
 
 if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
   echo "==> Configuring (first run)"
@@ -159,98 +160,223 @@ else
 fi
 rm -rf "$CONCURRENT_DIR"
 
-echo "==> Sharding & routing checks (Phase 10B)"
-SHARD_BASE_PORT=$((PORT + 1))
+echo "==> Sharding & routing checks (Phase 10B/10C)"
+PRIMARY_BASE_PORT=$((PORT + 1))
+REPLICA_BASE_PORT=$((PORT + 51))
 ROUTER_PORT=$((PORT + 10))
-SHARD_PIDS=()
-SHARD_ADDRS=()
-for i in 0 1 2; do
-  shard_port=$((SHARD_BASE_PORT + i))
-  shard_dir="$BUILD_DIR/smoke_test_shard_$shard_port"
-  rm -rf "$shard_dir"
-  mkdir -p "$shard_dir"
-  shard_conf="$BUILD_DIR/smoke_test_shard_$shard_port.conf"
-  cat > "$shard_conf" <<EOF
-port=$shard_port
-dir=$shard_dir
+PRIMARY_PIDS=()
+PRIMARY_ADDRS=()
+REPLICA_ADDRS=()
+
+# Sets LAST_SHARD_PID and appends to SHARDING_PIDS. Not used via command
+# substitution ($(...)) anywhere - that would run it in a subshell and
+# lose both of those mutations back in the caller.
+startShardNode() {
+  local node_port="$1"
+  local node_dir="$BUILD_DIR/smoke_test_shard_$node_port"
+  rm -rf "$node_dir"
+  mkdir -p "$node_dir"
+  local node_conf="$BUILD_DIR/smoke_test_shard_$node_port.conf"
+  cat > "$node_conf" <<EOF
+port=$node_port
+dir=$node_dir
 appendonly=false
 save_interval=0
 EOF
-  "$BUILD_DIR/src/tinykv-server" --config "$shard_conf" > "$BUILD_DIR/smoke_test_shard_$shard_port.log" 2>&1 &
-  SHARD_PIDS+=("$!")
-  SHARD_ADDRS+=("$HOST:$shard_port")
+  "$BUILD_DIR/src/tinykv-server" --config "$node_conf" > "$BUILD_DIR/smoke_test_shard_$node_port.log" 2>&1 &
+  LAST_SHARD_PID=$!
+  SHARDING_PIDS+=("$LAST_SHARD_PID")
+}
+
+for i in 0 1 2; do
+  primary_port=$((PRIMARY_BASE_PORT + i))
+  replica_port=$((REPLICA_BASE_PORT + i))
+  startShardNode "$primary_port"; PRIMARY_PIDS+=("$LAST_SHARD_PID")
+  startShardNode "$replica_port"
+  PRIMARY_ADDRS+=("$HOST:$primary_port")
+  REPLICA_ADDRS+=("$HOST:$replica_port")
 done
 
-ROUTER_CONF="$BUILD_DIR/smoke_test_router.conf"
-{
-  echo "port=$ROUTER_PORT"
-  IFS=,; echo "backends=${SHARD_ADDRS[*]}"; unset IFS
-} > "$ROUTER_CONF"
-"$BUILD_DIR/src/tinykv-router" --config "$ROUTER_CONF" > "$BUILD_DIR/smoke_test_router.log" 2>&1 &
-ROUTER_PID=$!
-
-SHARDING_READY=1
-for p in "${SHARD_BASE_PORT}" "$((SHARD_BASE_PORT + 1))" "$((SHARD_BASE_PORT + 2))" "$ROUTER_PORT"; do
-  ok=0
-  for _ in $(seq 1 50); do
-    nc -z "$HOST" "$p" 2>/dev/null && { ok=1; break; }
-    sleep 0.1
+# Wait for all 6 shard-node ports before wiring up replication between
+# them, so REPLICAOF below isn't racing a primary that hasn't bound yet.
+ALL_UP=1
+for i in 0 1 2; do
+  for p in "$((PRIMARY_BASE_PORT + i))" "$((REPLICA_BASE_PORT + i))"; do
+    ok=0
+    for _ in $(seq 1 50); do
+      nc -z "$HOST" "$p" 2>/dev/null && { ok=1; break; }
+      sleep 0.1
+    done
+    [[ "$ok" -eq 1 ]] || ALL_UP=0
   done
-  [[ "$ok" -eq 1 ]] || SHARDING_READY=0
 done
 
-if [[ "$SHARDING_READY" -ne 1 ]]; then
-  echo "  [FAIL] shards/router didn't start - see $BUILD_DIR/smoke_test_router.log"
+if [[ "$ALL_UP" -ne 1 ]]; then
+  echo "  [FAIL] shard primaries/replicas didn't all start"
   FAIL=$((FAIL + 1))
 else
-  routeCheck() {
-    local description="$1" key="$2"
-    local node
-    node="$(printf 'ROUTE %s\n' "$key" | nc -w 2 "$HOST" "$ROUTER_PORT")"
-    if [[ "$node" =~ ^\+$HOST:[0-9]+$ ]]; then
-      echo "  [PASS] $description ($node)"
+  for i in 0 1 2; do
+    replica_port=$((REPLICA_BASE_PORT + i))
+    printf 'REPLICAOF %s %s\n' "$HOST" "$((PRIMARY_BASE_PORT + i))" | nc -w 2 "$HOST" "$replica_port" > /dev/null
+  done
+  sleep 0.3  # let each replica finish its initial SYNC
+
+  TOPOLOGY_CONF="$BUILD_DIR/smoke_test_topology.conf"
+  {
+    echo "shards=shard0,shard1,shard2"
+    for i in 0 1 2; do
+      echo "shard$i.primary=${PRIMARY_ADDRS[$i]}"
+      echo "shard$i.replica=${REPLICA_ADDRS[$i]}"
+    done
+  } > "$TOPOLOGY_CONF"
+
+  ROUTER_CONF="$BUILD_DIR/smoke_test_router.conf"
+  cat > "$ROUTER_CONF" <<EOF
+port=$ROUTER_PORT
+topology_file=$TOPOLOGY_CONF
+health_check_interval_ms=200
+max_missed_pings=2
+EOF
+  "$BUILD_DIR/src/tinykv-router" --config "$ROUTER_CONF" > "$BUILD_DIR/smoke_test_router.log" 2>&1 &
+  ROUTER_PID=$!
+
+  ROUTER_UP=0
+  for _ in $(seq 1 50); do
+    nc -z "$HOST" "$ROUTER_PORT" 2>/dev/null && { ROUTER_UP=1; break; }
+    sleep 0.1
+  done
+
+  if [[ "$ROUTER_UP" -ne 1 ]]; then
+    echo "  [FAIL] router didn't start - see $BUILD_DIR/smoke_test_router.log"
+    FAIL=$((FAIL + 1))
+  else
+    routeCheck() {
+      local description="$1" key="$2"
+      local node
+      node="$(printf 'ROUTE %s\n' "$key" | nc -w 2 "$HOST" "$ROUTER_PORT")"
+      if [[ "$node" =~ ^\+$HOST:[0-9]+$ ]]; then
+        echo "  [PASS] $description ($node)"
+        PASS=$((PASS + 1))
+      else
+        echo "  [FAIL] $description (got: $node)"
+        FAIL=$((FAIL + 1))
+      fi
+    }
+
+    echo "-- Phase 10B: basic routing --"
+    check "SET through the router" "SET shardkey shardval\n" '+OK' "$ROUTER_PORT"
+    check "GET through the router returns the value" 'GET shardkey\n' '+shardval' "$ROUTER_PORT"
+    routeCheck "ROUTE reports a valid node address" 'shardkey'
+    check "PING through the router is answered locally" 'PING\n' '+OK' "$ROUTER_PORT"
+    check "ROUTE with wrong arity errors" 'ROUTE\n' "-ERR wrong number of arguments for 'ROUTE'" "$ROUTER_PORT"
+    check "ROUTE sent directly to a shard is rejected" 'ROUTE x\n' "-ERR ROUTE is only valid against tinykv-router, not tinykv-server" "$PRIMARY_BASE_PORT"
+
+    # Consistency: the node ROUTE names must be the one actually holding
+    # the value - write and read 12 distinct keys through the router,
+    # then read each one straight from the node ROUTE reported.
+    DIRECT_OK=1
+    for i in $(seq 1 12); do
+      printf 'SET rkey%d rval%d\n' "$i" "$i" | nc -w 2 "$HOST" "$ROUTER_PORT" > /dev/null
+    done
+    for i in $(seq 1 12); do
+      node="$(printf 'ROUTE rkey%d\n' "$i" | nc -w 2 "$HOST" "$ROUTER_PORT")"
+      node="${node#+}"
+      node_host="${node%:*}"
+      node_port="${node#*:}"
+      direct="$(printf 'GET rkey%d\n' "$i" | nc -w 2 "$node_host" "$node_port")"
+      [[ "$direct" == "+rval$i" ]] || DIRECT_OK=0
+    done
+    if [[ "$DIRECT_OK" -eq 1 ]]; then
+      echo "  [PASS] 12/12 keys found directly on the node ROUTE reported"
       PASS=$((PASS + 1))
     else
-      echo "  [FAIL] $description (got: $node)"
+      echo "  [FAIL] at least one key wasn't found directly on the node ROUTE reported"
       FAIL=$((FAIL + 1))
     fi
-  }
 
-  check "SET through the router" "SET shardkey shardval\n" '+OK' "$ROUTER_PORT"
-  check "GET through the router returns the value" 'GET shardkey\n' '+shardval' "$ROUTER_PORT"
-  routeCheck "ROUTE reports a valid shard address" 'shardkey'
-  check "PING through the router is answered locally" 'PING\n' '+OK' "$ROUTER_PORT"
-  check "ROUTE with wrong arity errors" 'ROUTE\n' "-ERR wrong number of arguments for 'ROUTE'" "$ROUTER_PORT"
-  check "ROUTE sent directly to a shard is rejected" 'ROUTE x\n' "-ERR ROUTE is only valid against tinykv-router, not tinykv-server" "$SHARD_BASE_PORT"
+    echo "-- Phase 10C: NODES + failover --"
+    initial_nodes="$(printf 'NODES\n' | nc -w 2 "$HOST" "$ROUTER_PORT")"
+    if [[ "$initial_nodes" == +shard0:* ]] && [[ "$initial_nodes" != *DOWN* ]]; then
+      echo "  [PASS] NODES reports all 6 nodes UP before any failure"
+      PASS=$((PASS + 1))
+    else
+      echo "  [FAIL] NODES before any failure: $initial_nodes"
+      FAIL=$((FAIL + 1))
+    fi
 
-  # Consistency: the shard ROUTE names must be the one actually holding
-  # the value - write and read 12 distinct keys directly through the
-  # router, then read each one straight from the shard ROUTE reported.
-  DIRECT_OK=1
-  for i in $(seq 1 12); do
-    printf 'SET rkey%d rval%d\n' "$i" "$i" | nc -w 2 "$HOST" "$ROUTER_PORT" > /dev/null
-  done
-  for i in $(seq 1 12); do
-    node="$(printf 'ROUTE rkey%d\n' "$i" | nc -w 2 "$HOST" "$ROUTER_PORT")"
-    node="${node#+}"
-    shard_host="${node%:*}"
-    shard_port="${node#*:}"
-    direct="$(printf 'GET rkey%d\n' "$i" | nc -w 2 "$shard_host" "$shard_port")"
-    [[ "$direct" == "+rval$i" ]] || DIRECT_OK=0
-  done
-  if [[ "$DIRECT_OK" -eq 1 ]]; then
-    echo "  [PASS] 12/12 keys found directly on the shard ROUTE reported"
-    PASS=$((PASS + 1))
-  else
-    echo "  [FAIL] at least one key wasn't found directly on the shard ROUTE reported"
-    FAIL=$((FAIL + 1))
+    printf 'SET failoverkey beforecrash\n' | nc -w 2 "$HOST" "$ROUTER_PORT" > /dev/null
+    owner="$(printf 'ROUTE failoverkey\n' | nc -w 2 "$HOST" "$ROUTER_PORT")"
+    owner="${owner#+}"
+    owner_index=-1
+    for i in 0 1 2; do
+      [[ "$owner" == "${PRIMARY_ADDRS[$i]}" ]] && owner_index=$i
+    done
+
+    if [[ "$owner_index" -lt 0 ]]; then
+      echo "  [FAIL] failoverkey didn't route to a known primary (got: $owner)"
+      FAIL=$((FAIL + 1))
+    else
+      target_pid="${PRIMARY_PIDS[$owner_index]}"
+      target_replica="${REPLICA_ADDRS[$owner_index]}"
+      kill -9 "$target_pid" 2>/dev/null
+      wait "$target_pid" 2>/dev/null
+
+      # health_check_interval_ms=200 * max_missed_pings=2 = 400ms to
+      # detect + promote; give it generous headroom for a loaded CI box.
+      sleep 2
+
+      afterCrashGet="$(printf 'GET failoverkey\n' | nc -w 2 "$HOST" "$ROUTER_PORT")"
+      if [[ "$afterCrashGet" == "+beforecrash" ]]; then
+        echo "  [PASS] data written before the crash survives on the promoted replica"
+        PASS=$((PASS + 1))
+      else
+        echo "  [FAIL] GET failoverkey after primary crash: $afterCrashGet"
+        FAIL=$((FAIL + 1))
+      fi
+
+      afterCrashRoute="$(printf 'ROUTE failoverkey\n' | nc -w 2 "$HOST" "$ROUTER_PORT")"
+      if [[ "$afterCrashRoute" == "+$target_replica" ]]; then
+        echo "  [PASS] ROUTE now points at the promoted replica ($target_replica)"
+        PASS=$((PASS + 1))
+      else
+        echo "  [FAIL] ROUTE after failover: expected +$target_replica, got $afterCrashRoute"
+        FAIL=$((FAIL + 1))
+      fi
+
+      check "writes still work via the promoted (now-primary) replica" 'SET failoverkey2 aftercrash\n' '+OK' "$ROUTER_PORT"
+      check "the write above is actually readable back" 'GET failoverkey2\n' '+aftercrash' "$ROUTER_PORT"
+
+      nodesAfter="$(printf 'NODES\n' | nc -w 2 "$HOST" "$ROUTER_PORT")"
+      expected_entry="shard$owner_index:PRIMARY:${PRIMARY_ADDRS[$owner_index]}:DOWN:STANDBY"
+      if [[ "$nodesAfter" == *"$expected_entry"* ]]; then
+        echo "  [PASS] NODES reports the crashed primary as DOWN/STANDBY"
+        PASS=$((PASS + 1))
+      else
+        echo "  [FAIL] NODES after failover didn't show the expected entry ($expected_entry): $nodesAfter"
+        FAIL=$((FAIL + 1))
+      fi
+
+      # Restart the old primary (simulated recovery) and confirm it does
+      # NOT silently resume - the whole point of latching failedOver.
+      startShardNode "${PRIMARY_ADDRS[$owner_index]#*:}"
+      sleep 1.5  # let a couple of health-check cycles observe it's back UP
+      routeAfterRestart="$(printf 'ROUTE failoverkey\n' | nc -w 2 "$HOST" "$ROUTER_PORT")"
+      if [[ "$routeAfterRestart" == "+$target_replica" ]]; then
+        echo "  [PASS] recovered old primary does not auto-resume - replica still active"
+        PASS=$((PASS + 1))
+      else
+        echo "  [FAIL] recovered primary auto-resumed (split-brain risk): $routeAfterRestart"
+        FAIL=$((FAIL + 1))
+      fi
+    fi
   fi
+
+  kill "$ROUTER_PID" 2>/dev/null; wait "$ROUTER_PID" 2>/dev/null
+  ROUTER_PID=""
 fi
 
-for pid in "${SHARD_PIDS[@]}"; do kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; done
-kill "$ROUTER_PID" 2>/dev/null; wait "$ROUTER_PID" 2>/dev/null
-SHARD_PIDS=()
-ROUTER_PID=""
+for pid in "${SHARDING_PIDS[@]}"; do kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; done
+SHARDING_PIDS=()
 
 echo ""
 echo "$PASS passed, $FAIL failed"

@@ -42,6 +42,7 @@ CommandType commandTypeFromName(const std::string& name) {
   if (upper == "REPLICAOF") return CommandType::REPLICAOF;
   if (upper == "SYNC") return CommandType::SYNC;
   if (upper == "ROUTE") return CommandType::ROUTE;
+  if (upper == "NODES") return CommandType::NODES;
   return CommandType::UNKNOWN;
 }
 

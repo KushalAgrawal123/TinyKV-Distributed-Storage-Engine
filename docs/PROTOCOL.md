@@ -46,7 +46,7 @@ Every reply is exactly one line, starting with a type prefix:
 `$-1` means "no value" (e.g. `GET` on a missing key) - it is never an
 error.
 
-## Commands (as of Phase 10B)
+## Commands (as of Phase 10C)
 
 | Command                  | Arguments        | Reply                                                     |
 |---------------------------|------------------|---------------------------------------------------------------|
@@ -65,6 +65,7 @@ error.
 | `REPLICAOF NO ONE`        | literal `NO ONE` | `+OK`; stops replicating and becomes a primary again            |
 | `SYNC`                    | (none)           | internal - see Replication below, not meant to be typed by hand |
 | `ROUTE key`                | key              | `+<host>:<port>`; **only valid against `tinykv-router`**, see Sharding below |
+| `NODES`                    | (none)           | `+<node>;<node>;...`; **only valid against `tinykv-router`**, see Fault tolerance below |
 
 Any write command (`SET`, `DEL`, `INCR`, `DECR`, `EXPIRE`, `PERSIST`) sent
 directly by a client to a replica is rejected with
@@ -139,52 +140,102 @@ supported.
 ### Sharding & routing
 
 `tinykv-router` is a separate executable that sits in front of a fixed
-set of ordinary, unmodified `tinykv-server` instances ("shards") listed
-in `router.conf`'s `backends` line. It speaks the exact same wire
-protocol as a normal server, so an existing client can't tell the
-difference except for one extra command:
+set of shards declared in `topology.conf` (see Fault tolerance below),
+each shard being one or two ordinary, unmodified `tinykv-server`
+instances. The router speaks the exact same wire protocol as a normal
+server, so an existing client can't tell the difference except for two
+extra commands (`ROUTE`, `NODES`):
 
 - For any command whose first argument is a key (`SET`, `GET`, `DEL`,
   `INCR`, `DECR`, `TTL`, `EXPIRE`, `PERSIST`), the router extracts that
-  key, decides which shard owns it, and transparently forwards the exact
-  request line to that shard's `tinykv-server`, relaying the reply back
-  unmodified. The client never talks to a shard directly.
+  key, decides which shard owns it and which physical node is currently
+  serving that shard, and transparently forwards the exact request line
+  to it, relaying the reply back unmodified. The client never talks to a
+  shard directly.
 - `ROUTE key` doesn't forward anything - it just answers with the
-  `host:port` of the shard that owns `key`, using the identical decision
-  the forwarding path itself uses (they share one `nodeForKey()`, so the
-  two can't disagree). Handy for verifying where a key actually lives.
+  `host:port` of whichever node is currently serving the shard that owns
+  `key`, using the identical decision the forwarding path itself uses
+  (they share one `addressForKey()`, so the two can't disagree). Handy
+  for verifying where a key actually lives - and, after a failover (see
+  below), for seeing that the answer has changed.
 - `PING` is answered locally by the router (it carries no key to route
-  by). Any other command with no arguments, `ROUTE` with the wrong arity,
-  or an unavailable shard produces a normal `-ERR ...` reply rather than
-  dropping the connection.
+  by). Any other command with no arguments, `ROUTE`/`NODES` with the
+  wrong arity, or an unavailable node produces a normal `-ERR ...` reply
+  rather than dropping the connection.
 
 Which shard owns which keys is decided by a **consistent hash ring**
 (`ConsistentHashRing`, keyed by a 64-bit FNV-1a hash with a
 MurmurHash3-style finalizing mix for better bit diffusion on short keys):
-each shard address is given 150 "virtual node" positions scattered
-around the ring, and a key belongs to the nearest virtual node clockwise
-from the key's own hash position. This is the reason to prefer consistent
-hashing over naive `hash(key) % shard_count`: adding or removing a shard
-only remaps the fraction of keys that fell between that shard's virtual
-positions and their new neighbors, not the entire keyspace.
+each shard is given 150 "virtual node" positions scattered around the
+ring, and a key belongs to the nearest virtual node clockwise from the
+key's own hash position. This is the reason to prefer consistent hashing
+over naive `hash(key) % shard_count`: adding or removing a shard only
+remaps the fraction of keys that fell between that shard's virtual
+positions and their new neighbors, not the entire keyspace. Critically,
+the ring hashes **shard ids** (`shard0`, `shard1`, ...), not physical
+addresses - which node is currently serving a shard can change (see
+failover below) without changing which shard a key belongs to, so a
+failover never causes a key to remap to a different shard, only to a
+different node serving the same shard.
 
-The shard list is static, read once from `router.conf` at startup -
-there's no dynamic membership or automatic data rebalancing. Adding a
-4th shard to a running deployment means restarting the router with the
-new `backends` line; existing data physically stays on whichever shard
-originally received it; only the *routing decision* for a given key can
-change, so a small number of keys will (correctly, if perhaps
-surprisingly) appear to "disappear" under the new routing until they're
-re-written. Fault tolerance and automatic promotion of a failed shard's
-replica are Phase 10C, not this phase - a shard being down here just
-means requests routed to it fail with `-ERR shard <addr> unavailable`
-until it (or the router) is restarted, while every other shard keeps
-working normally.
+The shard list is static, read once from `topology.conf` at router
+startup - there's no dynamic membership or automatic data rebalancing.
+Adding a 4th shard to a running deployment means restarting the router
+with an updated topology; existing data physically stays on whichever
+shard originally received it, so a small number of keys will (correctly,
+if perhaps surprisingly) appear to "disappear" under the new routing
+until they're re-written.
 
 The router keeps one persistent, mutex-guarded connection per shard
 (reused across all client connections) rather than opening a fresh
 connection per request; a broken connection is dropped and transparently
-reopened on the next request routed to that shard.
+reopened on the next request routed to that shard - including after a
+failover moves the shard's active address, which the connection notices
+and reconnects to automatically.
+
+### Fault tolerance & failover
+
+Each shard in `topology.conf` can declare a `<shardId>.replica` in
+addition to its `<shardId>.primary` - an ordinary Phase 10A replica of
+that primary, wired up the normal way (`REPLICAOF <primary host> <primary
+port>` run against it directly, outside the router entirely, before or
+after the router starts). A shard with no configured replica still
+routes normally; it just has nothing to fail over to.
+
+The router runs a background `HealthChecker` thread that, every
+`health_check_interval_ms` (`router.conf`, default 1000), opens one
+short-lived connection to each shard's primary and replica and sends a
+single `PING`. A node's health flips to DOWN after `max_missed_pings`
+(default 3) *consecutive* failed pings, and back to UP on the very next
+successful one.
+
+When a shard's primary is DOWN and its replica is UP and hasn't already
+been promoted for this failure, the router itself sends that replica
+`REPLICAOF NO ONE` (turning it into an independent, writable primary)
+and flips the shard's active address to it - all client traffic for that
+shard's keys is transparently redirected from that point on, with no
+client-visible interruption beyond the detection window itself.
+
+This is deliberately **single-coordinator failover**: the router is the
+sole authority making this decision, with no quorum, no consensus
+protocol (no Raft/Paxos), and no split-brain protection beyond one rule -
+**a promotion never reverses itself automatically**. A primary that comes
+back up after being marked DOWN is reported as UP again in `NODES`, but
+the router keeps routing to the promoted replica regardless; auto-
+reverting would risk both the old primary and the promoted replica
+believing they're simultaneously authoritative for the same shard. Un-
+doing a failover (e.g. after restoring or replacing the failed primary)
+is a manual operation: point the recovered node at the new primary with
+`REPLICAOF <new primary host> <new primary port>` run directly against
+it, outside the router.
+
+`NODES` reports every physical node the router knows about, one
+semicolon-separated entry per node, each formatted
+`<shardId>:<PRIMARY|REPLICA>:<host:port>:<UP|DOWN>:<ACTIVE|STANDBY>` -
+e.g. `shard0:PRIMARY:127.0.0.1:6381:DOWN:STANDBY;shard0:REPLICA:127.0.0.1:6391:UP:ACTIVE`
+after the scenario above. `ACTIVE` marks whichever node is currently
+serving that shard's traffic (initially always the primary); it is the
+same address `ROUTE` would return for any key belonging to that shard.
 
 Wrong argument counts and unknown commands both produce a `-ERR ...`
 reply; the connection is never dropped because of bad input.

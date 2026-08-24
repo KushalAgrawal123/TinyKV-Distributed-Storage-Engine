@@ -18,6 +18,8 @@ set(TINYKV_CORE_SOURCES
     replication/replica_link.cpp
     replication/replication_manager.cpp
     sharding/consistent_hash_ring.cpp
+    sharding/shard_topology.cpp
+    sharding/health_checker.cpp
     sharding/router.cpp
 )
 
